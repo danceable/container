@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="logo.svg" alt="Container Logo" />
+</p>
 
 # Container
 Container is a lightweight yet powerful IoC (dependency injection) container for Go projects.
