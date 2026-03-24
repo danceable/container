@@ -1,3 +1,9 @@
+[![Go Reference](https://pkg.go.dev/badge/github.com/danceable/container.svg)](https://pkg.go.dev/github.com/danceable/container)
+[![CI](https://github.com/danceable/container/actions/workflows/ci.yml/badge.svg)](https://github.com/danceable/container/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/danceable/container/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/danceable/container/actions/workflows/codeql-analysis.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/danceable/container)](https://goreportcard.com/report/github.com/danceable/container)
+[![Coverage Status](https://coveralls.io/repos/github/danceable/container/badge.svg)](https://coveralls.io/github/danceable/container?branch=master)
+
 <p align="center">
   <img src="logo.svg" alt="Container Logo" />
 </p>
