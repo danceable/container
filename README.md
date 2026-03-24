@@ -20,6 +20,7 @@ Features:
 - Optional lazy loading of bindings
 - Global instance for small applications
 - Concurrency-safe with no race conditions
+- Circular dependency detection
 - Bind-time and resolve-time parameter injection
 - 100% Test coverage!
 

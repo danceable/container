@@ -64,7 +64,7 @@ func (r *Registrar) Set(t reflect.Type, name string, b *Binding) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.hasCircularDependencies(t, name, reflect.TypeOf(b.resolver)) {
+	if r.hasCircularDependencies(t, name, b) {
 		return errors.ErrCircularDependency
 	}
 
@@ -88,7 +88,7 @@ func (r *Registrar) SetIfAbsent(t reflect.Type, name string, b *Binding) (wasNew
 		}
 	}
 
-	if r.hasCircularDependencies(t, name, reflect.TypeOf(b.resolver)) {
+	if r.hasCircularDependencies(t, name, b) {
 		return false, errors.ErrCircularDependency
 	}
 
@@ -123,7 +123,7 @@ func (r *Registrar) find(abstraction reflect.Type, name string) (*Binding, bool)
 }
 
 // hasCircularDependencies checks if the resolver function for a binding would introduce a circular dependency.
-func (r *Registrar) hasCircularDependencies(outType reflect.Type, name string, resolverType reflect.Type) bool {
+func (r *Registrar) hasCircularDependencies(outType reflect.Type, name string, b *Binding) bool {
 	type node struct {
 		t    reflect.Type
 		name string
@@ -147,8 +147,7 @@ func (r *Registrar) hasCircularDependencies(outType reflect.Type, name string, r
 			return false
 		}
 
-		rt := reflect.TypeOf(b.resolver)
-		for in := range rt.Ins() {
+		for _, in := range unsatisfiedInputs(b) {
 			if dfs(in, "") {
 				return true
 			}
@@ -157,11 +156,39 @@ func (r *Registrar) hasCircularDependencies(outType reflect.Type, name string, r
 		return false
 	}
 
-	for in := range resolverType.Ins() {
+	for _, in := range unsatisfiedInputs(b) {
 		if dfs(in, "") {
 			return true
 		}
 	}
 
 	return false
+}
+
+// unsatisfiedInputs returns the resolver input types not satisfied by the binding's bindParams.
+func unsatisfiedInputs(b *Binding) []reflect.Type {
+	rt := reflect.TypeOf(b.resolver)
+	used := make([]bool, len(b.bindParams))
+	var inputs []reflect.Type
+
+	for in := range rt.Ins() {
+		matched := false
+		for i, param := range b.bindParams {
+			if used[i] {
+				continue
+			}
+
+			if param.Type().AssignableTo(in) {
+				used[i] = true
+				matched = true
+				break
+			}
+		}
+
+		if !matched {
+			inputs = append(inputs, in)
+		}
+	}
+
+	return inputs
 }

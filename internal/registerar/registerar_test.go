@@ -369,6 +369,87 @@ func TestRegistrar_Set(t *testing.T) {
 		err := r.Set(typ, "", b)
 		assert.ErrorIs(t, err, errors.ErrCircularDependency)
 	})
+
+	t.Run("no_cycle_when_self_ref_satisfied_by_bind_params", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		typ := reflect.TypeFor[testShape]()
+		params := []reflect.Value{reflect.ValueOf(&testCircle{R: 5})}
+		b := registerar.NewBinding("", false, params, nil, func(s testShape) testShape { return s }, nil)
+
+		err := r.Set(typ, "", b)
+		assert.NoError(t, err)
+	})
+
+	t.Run("no_cycle_when_indirect_dep_satisfied_by_bind_params", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		// Register testDatabase depending on testShape.
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		// Register testShape depending on testDatabase, but testDatabase is supplied via bindParams.
+		params := []reflect.Value{reflect.ValueOf(&testMySQL{})}
+		bShape := registerar.NewBinding("", false, params, nil, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		assert.NoError(t, r.Set(shapeType, "", bShape))
+	})
+
+	t.Run("cycle_detected_when_bind_params_satisfy_only_some_deps", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		// Register testDatabase depending on testShape.
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		// Register testShape needing (int, testDatabase). int is satisfied by bindParams,
+		// but testDatabase still needs container lookup → cycle through testDatabase → testShape.
+		params := []reflect.Value{reflect.ValueOf(42)}
+		bShape := registerar.NewBinding("", false, params, nil, func(x int, d testDatabase) testShape { return &testCircle{} }, nil)
+		err := r.Set(shapeType, "", bShape)
+		assert.ErrorIs(t, err, errors.ErrCircularDependency)
+	})
+
+	t.Run("no_cycle_when_all_deps_satisfied_by_bind_params", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		// Register testDatabase depending on testShape.
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		// Register testShape needing (int, testDatabase). Both supplied via bindParams → no cycle.
+		params := []reflect.Value{reflect.ValueOf(42), reflect.ValueOf(&testMySQL{})}
+		bShape := registerar.NewBinding("", false, params, nil, func(x int, d testDatabase) testShape { return &testCircle{} }, nil)
+		assert.NoError(t, r.Set(shapeType, "", bShape))
+	})
+
+	t.Run("bind_param_not_reused_for_duplicate_dep_types", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		shapeType := reflect.TypeFor[testShape]()
+
+		// Resolver needs two testShape args, but only one bindParam is provided.
+		// The second testShape must come from the container — self-referencing cycle.
+		params := []reflect.Value{reflect.ValueOf(&testCircle{R: 1})}
+		b := registerar.NewBinding("", false, params, nil, func(a testShape, b testShape) testShape { return a }, nil)
+
+		err := r.Set(shapeType, "", b)
+		assert.ErrorIs(t, err, errors.ErrCircularDependency)
+	})
+
 	t.Run("detects_indirect_circular_dependency", func(t *testing.T) {
 		t.Parallel()
 
@@ -502,6 +583,19 @@ func TestRegistrar_SetIfAbsent(t *testing.T) {
 		wasNew, err := r.SetIfAbsent(typ, "", b)
 		assert.ErrorIs(t, err, errors.ErrCircularDependency)
 		assert.False(t, wasNew)
+	})
+
+	t.Run("no_cycle_when_self_ref_satisfied_by_bind_params", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		typ := reflect.TypeFor[testShape]()
+		params := []reflect.Value{reflect.ValueOf(&testCircle{R: 3})}
+		b := registerar.NewBinding("", false, params, nil, func(s testShape) testShape { return s }, nil)
+
+		wasNew, err := r.SetIfAbsent(typ, "", b)
+		assert.NoError(t, err)
+		assert.True(t, wasNew)
 	})
 }
 
