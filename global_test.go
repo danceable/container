@@ -181,6 +181,39 @@ func TestCall(t *testing.T) {
 	})
 }
 
+func TestScope(t *testing.T) {
+	t.Run("derives_child_from_default", func(t *testing.T) {
+		container.Reset()
+
+		err := container.Bind(func() Shape { return &Circle{a: 13} }, bind.Singleton())
+		assert.NoError(t, err)
+
+		child := container.Scope("child")
+		assert.Same(t, container.Default, child.Root())
+
+		var s Shape
+		assert.NoError(t, child.Resolve(&s))
+		assert.Equal(t, 13, s.GetArea())
+	})
+}
+
+func TestDerive(t *testing.T) {
+	t.Run("derives_anonymous_child_from_default", func(t *testing.T) {
+		container.Reset()
+
+		err := container.Bind(func() Shape { return &Circle{a: 13} }, bind.Singleton())
+		assert.NoError(t, err)
+
+		derived := container.Derive()
+		assert.Same(t, container.Default, derived.Root())
+		assert.Same(t, container.Default, derived.Parent())
+
+		var s Shape
+		assert.NoError(t, derived.Resolve(&s))
+		assert.Equal(t, 13, s.GetArea())
+	})
+}
+
 func TestResolve(t *testing.T) {
 	t.Run("simple", func(t *testing.T) {
 		container.Reset()

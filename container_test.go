@@ -2226,3 +2226,544 @@ func TestSlowResolverConcurrency(t *testing.T) {
 		}
 	})
 }
+
+func TestContainer_Scope(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates_child_with_shared_root", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		child := root.Scope("child")
+		grandchild := child.Scope("grandchild")
+
+		// Every scope in the tree shares the same root.
+		assert.Same(t, root, root.Root())
+		assert.Same(t, root, child.Root())
+		assert.Same(t, root, grandchild.Root())
+
+		// Parent links form the tree.
+		assert.Nil(t, root.Parent())
+		assert.Same(t, root, child.Parent())
+		assert.Same(t, child, grandchild.Parent())
+	})
+
+	t.Run("returns_existing_child_for_same_name", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		first := root.Scope("dupe")
+		second := root.Scope("dupe")
+
+		assert.Same(t, first, second)
+	})
+
+	t.Run("siblings_are_distinct", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		left := root.Scope("left")
+		right := root.Scope("right")
+
+		assert.NotSame(t, left, right)
+		assert.Same(t, root, left.Parent())
+		assert.Same(t, root, right.Parent())
+	})
+
+	t.Run("resolves_binding_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 7} }, bind.Singleton()))
+
+		child := root.Scope("child")
+		grandchild := child.Scope("grandchild")
+
+		var s Shape
+		require.NoError(t, grandchild.Resolve(&s))
+		assert.Equal(t, 7, s.GetArea())
+	})
+
+	t.Run("shares_ancestor_singleton_instance", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 1} }, bind.Singleton()))
+
+		child := root.Scope("child")
+
+		// Mutating the singleton from the root is visible from the child and vice versa.
+		require.NoError(t, root.Call(func(s Shape) { s.SetArea(42) }))
+
+		var fromChild Shape
+		require.NoError(t, child.Resolve(&fromChild))
+		assert.Equal(t, 42, fromChild.GetArea())
+	})
+
+	t.Run("child_binding_shadows_ancestor", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 1} }, bind.Singleton()))
+
+		child := root.Scope("child")
+		require.NoError(t, child.Bind(func() Shape { return &Circle{a: 2} }, bind.Singleton()))
+
+		var fromRoot, fromChild Shape
+		require.NoError(t, root.Resolve(&fromRoot))
+		require.NoError(t, child.Resolve(&fromChild))
+
+		assert.Equal(t, 1, fromRoot.GetArea())
+		assert.Equal(t, 2, fromChild.GetArea())
+	})
+
+	t.Run("ancestor_cannot_resolve_descendant_binding", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		child := root.Scope("child")
+		require.NoError(t, child.Bind(func() Shape { return &Circle{a: 9} }, bind.Singleton()))
+
+		var s Shape
+		err := root.Resolve(&s)
+		assert.ErrorIs(t, err, containerErrors.ErrNoConcreteFound)
+	})
+
+	t.Run("sibling_cannot_resolve_other_sibling_binding", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		left := root.Scope("left")
+		right := root.Scope("right")
+
+		require.NoError(t, left.Bind(func() Shape { return &Circle{a: 5} }, bind.Singleton()))
+
+		var s Shape
+		err := right.Resolve(&s)
+		assert.ErrorIs(t, err, containerErrors.ErrNoConcreteFound)
+	})
+
+	t.Run("ancestor_binding_dependency_resolves_lexically", func(t *testing.T) {
+		t.Parallel()
+
+		// Service is bound on the root and depends on Database. Database only exists on
+		// the child scope. Because a binding's dependencies resolve from the scope where it
+		// was registered, resolving Service from the child must still fail.
+		root := container.New()
+		require.NoError(t, root.Bind(func(db Database) Shape { return &Circle{a: 1} }, bind.Lazy()))
+
+		child := root.Scope("child")
+		require.NoError(t, child.Bind(func() Database { return MySQL{} }, bind.Singleton()))
+
+		var s Shape
+		err := child.Resolve(&s)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, containerErrors.ErrNoConcreteFound)
+	})
+
+	t.Run("child_binding_dependency_resolves_from_ancestor", func(t *testing.T) {
+		t.Parallel()
+
+		// A binding registered on the child can pull its dependencies from an ancestor scope.
+		root := container.New()
+		require.NoError(t, root.Bind(func() Database { return MySQL{} }, bind.Singleton()))
+
+		child := root.Scope("child")
+		require.NoError(t, child.Bind(func(db Database) Shape {
+			if db.Connect() {
+				return &Circle{a: 100}
+			}
+			return &Circle{a: 0}
+		}, bind.Lazy()))
+
+		var s Shape
+		require.NoError(t, child.Resolve(&s))
+		assert.Equal(t, 100, s.GetArea())
+	})
+
+	t.Run("call_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 3} }, bind.Singleton()))
+
+		child := root.Scope("child")
+
+		var got int
+		require.NoError(t, child.Call(func(s Shape) { got = s.GetArea() }))
+		assert.Equal(t, 3, got)
+	})
+
+	t.Run("fill_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 8} }, bind.Singleton()))
+
+		child := root.Scope("child")
+
+		type App struct {
+			Shape Shape `container:"type"`
+		}
+		var app App
+		require.NoError(t, child.Fill(&app))
+		assert.Equal(t, 8, app.Shape.GetArea())
+	})
+
+	t.Run("named_binding_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 21} }, bind.Singleton(), bind.WithName("special")))
+
+		child := root.Scope("child")
+
+		var s Shape
+		require.NoError(t, child.Resolve(&s, resolve.WithName("special")))
+		assert.Equal(t, 21, s.GetArea())
+	})
+
+	t.Run("named_dependency_binding_resolves_across_scopes", func(t *testing.T) {
+		t.Parallel()
+
+		// Exercises the bind-time named-binding path (arguments step 2b) across scopes.
+		root := container.New()
+		require.NoError(t, root.Bind(func() Database { return PostgreSQL{ready: true} },
+			bind.WithName("replica"), bind.Singleton(), bind.Lazy()))
+
+		child := root.Scope("child")
+		require.NoError(t, child.Bind(func(db Database) Shape {
+			if db.Connect() {
+				return &Circle{a: 55}
+			}
+			return &Circle{a: 0}
+		}, bind.Lazy(), bind.ResolveDependenciesByNamedBindings("replica")))
+
+		var s Shape
+		require.NoError(t, child.Resolve(&s))
+		assert.Equal(t, 55, s.GetArea())
+	})
+
+	t.Run("interface_fallback_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		// The concrete is bound on the root under the Shape interface; the child consumes a
+		// read-only interface that the same concrete implements, exercising the
+		// interface-implementation fallback (arguments step 3) across scopes.
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 12} }, bind.Singleton()))
+
+		child := root.Scope("child")
+
+		var got int
+		require.NoError(t, child.Call(func(ro ReadOnlyShape) { got = ro.GetArea() }))
+		assert.Equal(t, 12, got)
+	})
+}
+
+func TestContainer_Scope_Concurrency(t *testing.T) {
+	t.Parallel()
+
+	t.Run("concurrent_scope_creation_is_deduplicated", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+
+		const goroutines = 50
+		scopes := make([]*container.Container, goroutines)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := range goroutines {
+			go func(idx int) {
+				defer wg.Done()
+				scopes[idx] = root.Scope("shared")
+			}(i)
+		}
+		wg.Wait()
+
+		// Every goroutine must observe the very same child scope.
+		for i := 1; i < goroutines; i++ {
+			assert.Same(t, scopes[0], scopes[i])
+		}
+	})
+
+	t.Run("concurrent_resolution_across_scopes", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 77} }, bind.Singleton(), bind.Lazy()))
+
+		const goroutines = 50
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := range goroutines {
+			go func(idx int) {
+				defer wg.Done()
+
+				scope := root.Scope("worker")
+				var s Shape
+				assert.NoError(t, scope.Resolve(&s))
+				assert.Equal(t, 77, s.GetArea())
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	t.Run("concurrent_nested_scope_creation_and_binding", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+
+		const goroutines = 30
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := range goroutines {
+			go func(idx int) {
+				defer wg.Done()
+
+				child := root.Scope("child")
+				grandchild := child.Scope("grandchild")
+
+				require.NoError(t, grandchild.Bind(func() Logger { return StdLogger{} }, bind.Lazy()))
+
+				var l Logger
+				assert.NoError(t, grandchild.Resolve(&l))
+				assert.Equal(t, "logged", l.Log())
+			}(i)
+		}
+		wg.Wait()
+	})
+}
+
+func TestContainer_Derive(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates_anonymous_child_with_shared_root", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		derived := root.Derive()
+
+		// It still shares the root and links back to its parent.
+		assert.Same(t, root, derived.Root())
+		assert.Same(t, root, derived.Parent())
+	})
+
+	t.Run("each_call_returns_a_distinct_scope", func(t *testing.T) {
+		t.Parallel()
+
+		// Unlike Scope, Derive never deduplicates: every call is a brand new scope.
+		root := container.New()
+		first := root.Derive()
+		second := root.Derive()
+
+		assert.NotSame(t, first, second)
+		assert.Same(t, root, first.Parent())
+		assert.Same(t, root, second.Parent())
+	})
+
+	t.Run("derives_from_a_named_child_scope", func(t *testing.T) {
+		t.Parallel()
+
+		// Derive can be called on any scope, not just the root. The parent link points at
+		// the scope it was derived from while the root stays the top of the tree.
+		root := container.New()
+		child := root.Scope("child")
+		derived := child.Derive()
+
+		assert.Same(t, child, derived.Parent())
+		assert.Same(t, root, derived.Root())
+	})
+
+	t.Run("resolves_binding_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 7} }, bind.Singleton()))
+
+		derived := root.Derive()
+
+		var s Shape
+		require.NoError(t, derived.Resolve(&s))
+		assert.Equal(t, 7, s.GetArea())
+	})
+
+	t.Run("shares_ancestor_singleton_instance", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 1} }, bind.Singleton()))
+
+		derived := root.Derive()
+
+		// Mutating the singleton from the root is visible from the derived scope.
+		require.NoError(t, root.Call(func(s Shape) { s.SetArea(42) }))
+
+		var fromDerived Shape
+		require.NoError(t, derived.Resolve(&fromDerived))
+		assert.Equal(t, 42, fromDerived.GetArea())
+	})
+
+	t.Run("derived_binding_shadows_ancestor", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 1} }, bind.Singleton()))
+
+		derived := root.Derive()
+		require.NoError(t, derived.Bind(func() Shape { return &Circle{a: 2} }, bind.Singleton()))
+
+		var fromRoot, fromDerived Shape
+		require.NoError(t, root.Resolve(&fromRoot))
+		require.NoError(t, derived.Resolve(&fromDerived))
+
+		assert.Equal(t, 1, fromRoot.GetArea())
+		assert.Equal(t, 2, fromDerived.GetArea())
+	})
+
+	t.Run("ancestor_cannot_resolve_derived_binding", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		derived := root.Derive()
+		require.NoError(t, derived.Bind(func() Shape { return &Circle{a: 9} }, bind.Singleton()))
+
+		var s Shape
+		err := root.Resolve(&s)
+		assert.ErrorIs(t, err, containerErrors.ErrNoConcreteFound)
+	})
+
+	t.Run("derived_scopes_are_isolated_from_each_other", func(t *testing.T) {
+		t.Parallel()
+
+		// Two scopes derived from the same parent are independent: a binding on one is
+		// invisible to the other, mirroring sibling isolation for named scopes.
+		root := container.New()
+		left := root.Derive()
+		right := root.Derive()
+
+		require.NoError(t, left.Bind(func() Shape { return &Circle{a: 5} }, bind.Singleton()))
+
+		var s Shape
+		err := right.Resolve(&s)
+		assert.ErrorIs(t, err, containerErrors.ErrNoConcreteFound)
+	})
+
+	t.Run("derived_binding_dependency_resolves_from_ancestor", func(t *testing.T) {
+		t.Parallel()
+
+		// A binding registered on the derived scope can pull its dependencies from an ancestor.
+		root := container.New()
+		require.NoError(t, root.Bind(func() Database { return MySQL{} }, bind.Singleton()))
+
+		derived := root.Derive()
+		require.NoError(t, derived.Bind(func(db Database) Shape {
+			if db.Connect() {
+				return &Circle{a: 100}
+			}
+			return &Circle{a: 0}
+		}, bind.Lazy()))
+
+		var s Shape
+		require.NoError(t, derived.Resolve(&s))
+		assert.Equal(t, 100, s.GetArea())
+	})
+
+	t.Run("call_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 3} }, bind.Singleton()))
+
+		derived := root.Derive()
+
+		var got int
+		require.NoError(t, derived.Call(func(s Shape) { got = s.GetArea() }))
+		assert.Equal(t, 3, got)
+	})
+
+	t.Run("fill_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 8} }, bind.Singleton()))
+
+		derived := root.Derive()
+
+		type App struct {
+			Shape Shape `container:"type"`
+		}
+		var app App
+		require.NoError(t, derived.Fill(&app))
+		assert.Equal(t, 8, app.Shape.GetArea())
+	})
+
+	t.Run("named_binding_resolves_from_ancestor_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 21} }, bind.Singleton(), bind.WithName("special")))
+
+		derived := root.Derive()
+
+		var s Shape
+		require.NoError(t, derived.Resolve(&s, resolve.WithName("special")))
+		assert.Equal(t, 21, s.GetArea())
+	})
+}
+
+func TestContainer_Derive_Concurrency(t *testing.T) {
+	t.Parallel()
+
+	t.Run("concurrent_derive_returns_distinct_scopes", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+
+		const goroutines = 50
+		scopes := make([]*container.Container, goroutines)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := range goroutines {
+			go func(idx int) {
+				defer wg.Done()
+				scopes[idx] = root.Derive()
+			}(i)
+		}
+		wg.Wait()
+
+		// Every derived scope must be unique — Derive never deduplicates.
+		seen := make(map[*container.Container]struct{}, goroutines)
+		for _, s := range scopes {
+			require.NotNil(t, s)
+			_, dup := seen[s]
+			assert.False(t, dup, "Derive returned a duplicate scope")
+			seen[s] = struct{}{}
+		}
+		assert.Len(t, seen, goroutines)
+	})
+
+	t.Run("concurrent_resolution_across_derived_scopes", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		require.NoError(t, root.Bind(func() Shape { return &Circle{a: 77} }, bind.Singleton(), bind.Lazy()))
+
+		const goroutines = 50
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+		for i := range goroutines {
+			go func(idx int) {
+				defer wg.Done()
+
+				derived := root.Derive()
+				var s Shape
+				assert.NoError(t, derived.Resolve(&s))
+				assert.Equal(t, 77, s.GetArea())
+			}(i)
+		}
+		wg.Wait()
+	})
+}

@@ -13,6 +13,16 @@ func Reset() {
 	Default.Reset()
 }
 
+// Scope calls the same method of the default concrete.
+func Scope(name string) *Container {
+	return Default.Scope(name)
+}
+
+// Derive calls the same method of the default concrete.
+func Derive() *Container {
+	return Default.Derive()
+}
+
 // Bind calls the same method of the default concrete.
 func Bind(receiver any, opts ...bind.BindOption) error {
 	return Default.Bind(receiver, opts...)

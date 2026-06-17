@@ -15,12 +15,13 @@ It's built neat, easy-to-use, and performance-in-mind to be your ultimate requir
 Features:
 - Singleton and Transient bindings
 - Named dependencies (bindings)
+- Scoped containers (a nested scope tree sharing a single root)
 - Resolve by functions, variables, and structs
 - Must helpers that convert errors to panics
 - Optional lazy loading of bindings
 - Global instance for small applications
 - Concurrency-safe with no race conditions
-- Circular dependency detection
+- Basic circular dependency detection
 - Bind-time and resolve-time parameter injection
 - 100% Test coverage!
 
@@ -244,6 +245,45 @@ var svc ReportService
 c.Resolve(&svc) // Reporter receives the "replica" Database
 ```
 
+#### Scoped Containers
+
+`Scope()` derives a nested child container that shares the same root scope, forming a scope tree. A scope can resolve bindings registered on itself or on any of its ancestors, while its own bindings stay invisible to ancestor and sibling scopes. This is useful for layering request- or task-scoped dependencies on top of long-lived application-wide ones.
+
+```go
+root := container.New()
+
+// Application-wide singleton, visible to every scope in the tree.
+root.Bind(func() Database {
+    return &MySQL{Host: "localhost"}
+}, bind.Singleton())
+
+// A nested scope — e.g. per request.
+request := root.Scope("request")
+
+// Bindings on the child shadow ancestors and stay local to this scope.
+request.Bind(func() Logger {
+    return &RequestLogger{ID: "req-123"}
+}, bind.Singleton())
+
+var db Database
+request.Resolve(&db) // resolved from the root scope
+
+var log Logger
+request.Resolve(&log) // resolved from the request scope
+```
+
+A binding's dependencies are resolved from the scope where the binding was registered. A service bound on the root therefore never sees services that live only in a descendant scope. Calling `Scope()` with a name that already exists on a scope returns the existing child, so the tree never holds duplicate siblings. The package-level `container.Scope()` derives a scope from the global `container.Default`.
+
+```go
+root := container.New()
+a := root.Scope("a")
+b := root.Scope("a") // a == b — same child returned
+
+a.Root()   // == root
+a.Parent() // == root
+a.Name()   // "a"
+```
+
 #### Parameter Resolution Precedence
 
 When a resolver function has arguments, the container resolves them using multiple sources. If the same argument type is available from more than one source, the following precedence applies (highest to lowest):
@@ -283,7 +323,11 @@ c.Resolve(&db, resolve.WithParams(42, &Circle{Area: 77}))
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `New` | `New() *Container` | Creates a new container instance. |
+| `New` | `New() *Container` | Creates a new container instance (a root scope). |
+| `Scope` | `Scope(name string) *Container` | Derives a nested child scope that shares the same root scope. Resolves bindings from itself and its ancestors. Returns the existing child if the name is already taken. |
+| `Name` | `Name() string` | Returns the scope's name (empty for a root scope). |
+| `Root` | `Root() *Container` | Returns the root scope of the tree. |
+| `Parent` | `Parent() *Container` | Returns the enclosing scope, or nil for a root scope. |
 | `Bind` | `Bind(resolver any, opts ...bind.BindOption) error` | Registers a resolver function that maps an abstraction to its concrete implementation. |
 | `Resolve` | `Resolve(abstraction any, opts ...resolve.ResolveOption) error` | Fills a pointer-to-interface (or pointer-to-type) with the matching concrete from the container. |
 | `Call` | `Call(function any, opts ...resolve.ResolveOption) error` | Invokes a function whose parameters are automatically resolved from the container. The function may optionally return an `error`. |

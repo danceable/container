@@ -5,6 +5,7 @@ package container
 import (
 	"fmt"
 	"reflect"
+	"sync"
 	"unsafe"
 
 	"github.com/danceable/container/bind"
@@ -15,13 +16,79 @@ import (
 
 // Container holds the registrar and provides methods to interact with bindings.
 // It is the entry point in the package.
+//
+// Containers form a scope tree: every Container created with New is a root scope,
+// and Scope derives nested child scopes from it. A scope can resolve bindings
+// registered on itself or any of its ancestors, but bindings are never visible to
+// ancestor or sibling scopes.
 type Container struct {
 	reg *registerar.Registrar
+
+	name     string                // name is the scope name; empty for a root scope.
+	root     *Container            // root points to the top-most scope of the tree.
+	parent   *Container            // parent points to the enclosing scope; nil for a root scope.
+	children map[string]*Container // children holds the nested scopes keyed by name.
+
+	mu sync.Mutex // mu guards the children map.
 }
 
-// New creates a new concrete of the Container.
+// New creates a new root scope of the Container.
 func New() *Container {
-	return &Container{reg: registerar.NewRegisterar()}
+	c := &Container{
+		reg:      registerar.NewRegisterar(),
+		children: make(map[string]*Container),
+	}
+	c.root = c
+
+	return c
+}
+
+// Scope returns a nested child scope that shares the same root scope, forming a scope tree.
+// The child can resolve bindings registered on itself or on any ancestor scope, while its own
+// bindings stay invisible to ancestor and sibling scopes. Calling Scope with a name that already
+// exists on this scope returns the existing child, so the tree never holds duplicate siblings.
+func (c *Container) Scope(name string) *Container {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if child, exist := c.children[name]; exist {
+		return child
+	}
+
+	child := &Container{
+		reg:      registerar.NewRegisterar(),
+		name:     name,
+		root:     c.root,
+		parent:   c,
+		children: make(map[string]*Container),
+	}
+	c.children[name] = child
+
+	return child
+}
+
+// Derive returns an anonymous child scope that is NOT registered on its parent.
+// It resolves bindings from itself and its ancestors exactly like a named Scope, but because
+// the parent keeps no reference to it, the scope — and the bindings it owns — becomes eligible
+// for garbage collection as soon as the caller drops it. This makes Derive the cheapest way to
+// create an ephemeral, per-operation scope: there is nothing to clean up.
+func (c *Container) Derive() *Container {
+	return &Container{
+		reg:      registerar.NewRegisterar(),
+		root:     c.root,
+		parent:   c,
+		children: make(map[string]*Container),
+	}
+}
+
+// Root returns the root scope of the tree the scope belongs to.
+func (c *Container) Root() *Container {
+	return c.root
+}
+
+// Parent returns the enclosing scope, or nil if the scope is a root scope.
+func (c *Container) Parent() *Container {
+	return c.parent
 }
 
 // Reset deletes all the existing bindings and empties the container.
@@ -113,8 +180,8 @@ func (c *Container) Resolve(abstraction any, opts ...resolve.ResolveOption) erro
 
 	elem := receiverType.Elem()
 
-	if binding, exist := c.reg.Get(elem, options.Name); exist {
-		instance, err := c.make(binding, options.Params)
+	if binding, owner, exist := c.lookup(elem, options.Name); exist {
+		instance, err := owner.make(binding, options.Params)
 		if err == nil {
 			reflect.ValueOf(abstraction).Elem().Set(reflect.ValueOf(instance))
 			return nil
@@ -167,52 +234,54 @@ func (c *Container) Fill(structure any, opts ...resolve.ResolveOption) error {
 		return errors.ErrInvalidStructure
 	}
 
-	if receiverType.Kind() == reflect.Pointer {
-		elem := receiverType.Elem()
-		if elem.Kind() == reflect.Struct {
-			s := reflect.ValueOf(structure).Elem()
+	if receiverType.Kind() != reflect.Pointer {
+		return errors.ErrInvalidStructure
+	}
 
-			options := resolve.DefaultOptions()
-			for _, o := range opts {
-				o(options)
+	elem := receiverType.Elem()
+	if elem.Kind() != reflect.Struct {
+		return errors.ErrInvalidStructure
+	}
+
+	s := reflect.ValueOf(structure).Elem()
+
+	options := resolve.DefaultOptions()
+	for _, o := range opts {
+		o(options)
+	}
+
+	for i := 0; i < s.NumField(); i++ {
+		f := s.Field(i)
+
+		if t, exist := s.Type().Field(i).Tag.Lookup("container"); exist {
+			var name string
+
+			switch t {
+			case "type":
+				name = options.Name
+			case "name":
+				name = s.Type().Field(i).Name
+			default:
+				return fmt.Errorf("%w; the field is: %s", errors.ErrInvalidStructTag, s.Type().Field(i).Name)
 			}
 
-			for i := 0; i < s.NumField(); i++ {
-				f := s.Field(i)
-
-				if t, exist := s.Type().Field(i).Tag.Lookup("container"); exist {
-					var name string
-
-					switch t {
-					case "type":
-						name = options.Name
-					case "name":
-						name = s.Type().Field(i).Name
-					default:
-						return fmt.Errorf("%w; the field is: %s", errors.ErrInvalidStructTag, s.Type().Field(i).Name)
-					}
-
-					if binding, exist := c.reg.Get(f.Type(), name); exist {
-						instance, err := c.make(binding, options.Params)
-						if err != nil {
-							return err
-						}
-
-						ptr := reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
-						ptr.Set(reflect.ValueOf(instance))
-
-						continue
-					}
-
-					return fmt.Errorf("%w; the field is: %s", errors.ErrCannotMakeField, s.Type().Field(i).Name)
+			if binding, owner, exist := c.lookup(f.Type(), name); exist {
+				instance, err := owner.make(binding, options.Params)
+				if err != nil {
+					return err
 				}
+
+				ptr := reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+				ptr.Set(reflect.ValueOf(instance))
+
+				continue
 			}
 
-			return nil
+			return fmt.Errorf("%w; the field is: %s", errors.ErrCannotMakeField, s.Type().Field(i).Name)
 		}
 	}
 
-	return errors.ErrInvalidStructure
+	return nil
 }
 
 // validateResolverFunction checks if the resolver function signature is valid.
@@ -237,6 +306,31 @@ func (c *Container) validateResolverFunction(funcType reflect.Type) error {
 	}
 
 	return nil
+}
+
+// lookup walks up the scope tree from c and returns the first binding matching the
+// exact type and name, together with the scope that owns it. The owning scope is used to
+// resolve the binding so its dependencies are looked up from where it was registered.
+func (c *Container) lookup(t reflect.Type, name string) (*registerar.Binding, *Container, bool) {
+	for scope := c; scope != nil; scope = scope.parent {
+		if binding, exist := scope.reg.Get(t, name); exist {
+			return binding, scope, true
+		}
+	}
+
+	return nil, nil, false
+}
+
+// find walks up the scope tree from c and returns the first binding matching the abstraction
+// (with interface-implementation fallback) and name, together with the scope that owns it.
+func (c *Container) find(abstraction reflect.Type, name string) (*registerar.Binding, *Container, bool) {
+	for scope := c; scope != nil; scope = scope.parent {
+		if binding, exist := scope.reg.Find(abstraction, name); exist {
+			return binding, scope, true
+		}
+	}
+
+	return nil, nil, false
 }
 
 // make resolves the dependencies of the binding and returns the concrete instance.
@@ -296,8 +390,8 @@ func (c *Container) arguments(function any, resolveParams, bindParams []reflect.
 		// 2b. Bind-time named bindings.
 		resolved := false
 		for _, nbName := range namedBindings {
-			if binding, exist := c.reg.Find(abstraction, nbName); exist {
-				instance, err := c.make(binding, resolveParams)
+			if binding, owner, exist := c.find(abstraction, nbName); exist {
+				instance, err := owner.make(binding, resolveParams)
 				if err != nil {
 					return nil, err
 				}
@@ -311,8 +405,8 @@ func (c *Container) arguments(function any, resolveParams, bindParams []reflect.
 		}
 
 		// 3. Container fallback.
-		if binding, exist := c.reg.Find(abstraction, name); exist {
-			instance, err := c.make(binding, resolveParams)
+		if binding, owner, exist := c.find(abstraction, name); exist {
+			instance, err := owner.make(binding, resolveParams)
 			if err != nil {
 				return nil, err
 			}
