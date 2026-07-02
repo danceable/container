@@ -200,15 +200,21 @@ c.Resolve(&replica, resolve.WithName("replica"))
 
 Use `resolve.WithParams()` to supply values at resolve time. These are matched by type to the resolver's arguments and take precedence over container bindings.
 
+**Important:** When using `resolve.WithParams()`, bind with `bind.Lazy()` so the resolver is not invoked until the parameters are available at resolve time. Without `bind.Lazy()`, an eager binding will fail if parameters cannot be resolved at bind time.
+
 ```go
 c := container.New()
 
+// Bind with Lazy() so the resolver isn't called until resolve time,
+// when we have the DSN parameter available
 c.Bind(func(dsn string) Database {
     return &MySQL{DSN: dsn}
 }, bind.Lazy())
 
 var db Database
+// Provide the DSN value at resolve time
 c.Resolve(&db, resolve.WithParams("user:pass@tcp(localhost)/mydb"))
+// db is now a MySQL instance with the provided DSN
 ```
 
 #### Binding with Pre-set Parameters
