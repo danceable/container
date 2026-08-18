@@ -72,3 +72,10 @@ type AppService struct{}
 var _ Service = AppService{}
 
 func (AppService) Run() string { return "running" }
+
+// valueError is an error that is not nilable: a struct value, not a pointer.
+type valueError struct{}
+
+var _ error = valueError{}
+
+func (valueError) Error() string { return "value error" }

@@ -2,6 +2,7 @@ package registerar_test
 
 import (
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 
@@ -31,6 +32,15 @@ type testMySQL struct{}
 
 func (m *testMySQL) Name() string {
 	return "mysql"
+}
+
+// testSquare is a second implementation of testShape.
+type testSquare struct {
+	S int
+}
+
+func (s *testSquare) Area() int {
+	return s.S * s.S
 }
 
 type testLogger interface {
@@ -668,5 +678,469 @@ func TestRegistrar_ConcurrentAccess(t *testing.T) {
 			})
 		}
 		wg.Wait()
+	})
+}
+
+// TestRegistrar_CircularDependencies covers what the graph adds on top of a plain yes or
+// no: the path of the cycle, and the rollback of the refused registration.
+func TestRegistrar_CircularDependencies(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reports_the_path_of_the_cycle", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		bShape := registerar.NewBinding("", false, nil, nil, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		err := r.Set(shapeType, "", bShape)
+
+		require.ErrorIs(t, err, errors.ErrCircularDependency)
+		assert.Contains(t, err.Error(), "registerar_test.testShape -> registerar_test.testDatabase -> registerar_test.testShape")
+	})
+
+	t.Run("names_the_binding_in_the_path_of_the_cycle", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		shapeType := reflect.TypeFor[testShape]()
+		b := registerar.NewBinding("circle", false, nil, nil, func(s testShape) testShape { return s }, nil)
+
+		err := r.Set(shapeType, "circle", b)
+
+		require.ErrorIs(t, err, errors.ErrCircularDependency)
+		assert.Contains(t, err.Error(), `registerar_test.testShape("circle") -> registerar_test.testShape("circle")`)
+	})
+
+	t.Run("detects_a_cycle_between_bindings_of_the_same_name", func(t *testing.T) {
+		t.Parallel()
+
+		// A named binding resolves under its own name.
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("primary", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "primary", bDB))
+
+		bShape := registerar.NewBinding("primary", false, nil, nil, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		err := r.Set(shapeType, "primary", bShape)
+
+		assert.ErrorIs(t, err, errors.ErrCircularDependency)
+	})
+
+	t.Run("ignores_a_binding_registered_under_another_name", func(t *testing.T) {
+		t.Parallel()
+
+		// Nothing is registered under "primary": no edge, and so no cycle.
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		bShape := registerar.NewBinding("primary", false, nil, nil, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		assert.NoError(t, r.Set(shapeType, "primary", bShape))
+	})
+
+	t.Run("follows_the_named_bindings_given_at_bind_time", func(t *testing.T) {
+		t.Parallel()
+
+		// Neither reaches the other under its own name: each is told to resolve from the
+		// other's, which closes the cycle.
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("primary", false, nil, []string{""}, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "primary", bDB))
+
+		bShape := registerar.NewBinding("", false, nil, []string{"primary"}, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		err := r.Set(shapeType, "", bShape)
+
+		require.ErrorIs(t, err, errors.ErrCircularDependency)
+		assert.Contains(t, err.Error(), `registerar_test.testShape -> registerar_test.testDatabase("primary") -> registerar_test.testShape`)
+	})
+
+	t.Run("falls_back_to_the_name_of_the_binding", func(t *testing.T) {
+		t.Parallel()
+
+		// The named binding given at bind time matches nothing, so the dependency is
+		// looked up the usual way — and that is what closes the cycle.
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		bShape := registerar.NewBinding("", false, nil, []string{"nonexistent"}, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		err := r.Set(shapeType, "", bShape)
+
+		assert.ErrorIs(t, err, errors.ErrCircularDependency)
+	})
+
+	t.Run("detects_a_cycle_through_an_interface_the_binding_implements", func(t *testing.T) {
+		t.Parallel()
+
+		// Nothing else implements the interface, so the binding would be handed itself.
+		r := registerar.NewRegisterar()
+		circleType := reflect.TypeFor[*testCircle]()
+		b := registerar.NewBinding("", false, nil, nil, func(s testShape) *testCircle { return &testCircle{} }, nil)
+
+		err := r.Set(circleType, "", b)
+
+		require.ErrorIs(t, err, errors.ErrCircularDependency)
+		assert.Contains(t, err.Error(), "*registerar_test.testCircle -> *registerar_test.testCircle")
+	})
+
+	t.Run("no_cycle_when_another_implementation_answers_first", func(t *testing.T) {
+		t.Parallel()
+
+		// A second implementation is registered first, and answers for the interface.
+		circleType := reflect.TypeFor[*testCircle]()
+		squareType := reflect.TypeFor[*testSquare]()
+
+		for range 50 {
+			r := registerar.NewRegisterar()
+			square := registerar.NewBinding("", false, nil, nil, func() *testSquare { return &testSquare{S: 2} }, nil)
+			require.NoError(t, r.Set(squareType, "", square))
+
+			b := registerar.NewBinding("", false, nil, nil, func(s testShape) *testCircle { return &testCircle{} }, nil)
+			require.NoError(t, r.Set(circleType, "", b), "the registration must not depend on the order of a map walk")
+		}
+	})
+
+	t.Run("rolls_the_refused_registration_back", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		bShape := registerar.NewBinding("", false, nil, nil, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		require.ErrorIs(t, r.Set(shapeType, "", bShape), errors.ErrCircularDependency)
+
+		_, exist := r.Get(shapeType, "")
+		assert.False(t, exist, "the refused binding must not be stored")
+
+		// The slot is left free, so a binding that closes no cycle still fits in it.
+		bFine := registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+		assert.NoError(t, r.Set(shapeType, "", bFine))
+
+		got, exist := r.Get(shapeType, "")
+		assert.True(t, exist)
+		assert.Equal(t, bFine, got)
+	})
+
+	t.Run("leaves_the_other_bindings_of_the_type_alone", func(t *testing.T) {
+		t.Parallel()
+
+		// Rolling the second name back must not touch the one next to it.
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		kept := registerar.NewBinding("kept", false, nil, nil, func() testShape { return &testCircle{R: 1} }, nil)
+		require.NoError(t, r.Set(shapeType, "kept", kept))
+
+		bDB := registerar.NewBinding("refused", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "refused", bDB))
+
+		cyclic := registerar.NewBinding("refused", false, nil, nil, func(d testDatabase) testShape { return &testCircle{R: 2} }, nil)
+		require.ErrorIs(t, r.Set(shapeType, "refused", cyclic), errors.ErrCircularDependency)
+
+		_, exist := r.Get(shapeType, "refused")
+		assert.False(t, exist, "the refused binding must not be stored")
+
+		got, exist := r.Get(shapeType, "kept")
+		assert.True(t, exist, "the other name of the same type must survive")
+		assert.Equal(t, kept, got)
+	})
+
+	t.Run("keeps_the_binding_the_refused_one_would_have_replaced", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bShape := registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{R: 1} }, nil)
+		require.NoError(t, r.Set(shapeType, "", bShape))
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		// Rebinding the Shape to a resolver that needs the Database closes the cycle.
+		cyclic := registerar.NewBinding("", false, nil, nil, func(d testDatabase) testShape { return &testCircle{R: 2} }, nil)
+		require.ErrorIs(t, r.Set(shapeType, "", cyclic), errors.ErrCircularDependency)
+
+		got, exist := r.Get(shapeType, "")
+		assert.True(t, exist)
+		assert.Equal(t, bShape, got, "the binding that was already there must survive")
+	})
+
+	t.Run("keeps_detecting_cycles_after_a_binding_is_deleted", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		logType := reflect.TypeFor[testLogger]()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		// Deleting the Logger leaves the graph with a slot it knows nothing about.
+		bLog := registerar.NewBinding("", false, nil, nil, func() testLogger { return nil }, nil)
+		require.NoError(t, r.Set(logType, "", bLog))
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		r.Delete(logType, "")
+
+		bShape := registerar.NewBinding("", false, nil, nil, func(d testDatabase) testShape { return &testCircle{} }, nil)
+		assert.ErrorIs(t, r.Set(shapeType, "", bShape), errors.ErrCircularDependency)
+	})
+
+	t.Run("detects_a_cycle_closed_by_a_dependency_registered_later", func(t *testing.T) {
+		t.Parallel()
+
+		// Neither of the first two closes a cycle: the Shape is still unknown.
+		r := registerar.NewRegisterar()
+		logType := reflect.TypeFor[testLogger]()
+		dbType := reflect.TypeFor[testDatabase]()
+		shapeType := reflect.TypeFor[testShape]()
+
+		bDB := registerar.NewBinding("", false, nil, nil, func(s testShape) testDatabase { return &testMySQL{} }, nil)
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		bLog := registerar.NewBinding("", false, nil, nil, func(d testDatabase) testLogger { return nil }, nil)
+		require.NoError(t, r.Set(logType, "", bLog))
+
+		bShape := registerar.NewBinding("", false, nil, nil, func(l testLogger) testShape { return &testCircle{} }, nil)
+		err := r.Set(shapeType, "", bShape)
+
+		require.ErrorIs(t, err, errors.ErrCircularDependency)
+		assert.Contains(t, err.Error(), "registerar_test.testShape -> registerar_test.testLogger -> registerar_test.testDatabase -> registerar_test.testShape")
+	})
+}
+
+// TestRegistrar_FindPicksTheSameImplementationEveryTime covers the fallback when several
+// bound types implement the interface, which a map walk alone would leave to chance.
+func TestRegistrar_FindPicksTheSameImplementationEveryTime(t *testing.T) {
+	t.Parallel()
+
+	shapeType := reflect.TypeFor[testShape]()
+	circleType := reflect.TypeFor[*testCircle]()
+	squareType := reflect.TypeFor[*testSquare]()
+
+	r := registerar.NewRegisterar()
+	circle := registerar.NewBinding("", false, nil, nil, func() *testCircle { return &testCircle{R: 1} }, nil)
+	square := registerar.NewBinding("", false, nil, nil, func() *testSquare { return &testSquare{S: 2} }, nil)
+
+	require.NoError(t, r.Set(circleType, "", circle))
+	require.NoError(t, r.Set(squareType, "", square))
+
+	for range 100 {
+		got, exist := r.Find(shapeType, "")
+		require.True(t, exist)
+		assert.Equal(t, circle, got, "the implementation registered first is the one that answers")
+
+		slot, exist := r.FindSlot(shapeType, "")
+		require.True(t, exist)
+		assert.Equal(t, registerar.Slot{Type: circleType}, slot)
+	}
+}
+
+func TestRegistrar_FindSlot(t *testing.T) {
+	t.Parallel()
+
+	shapeType := reflect.TypeFor[testShape]()
+	circleType := reflect.TypeFor[*testCircle]()
+
+	t.Run("returns_the_slot_of_an_exact_match", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		b := registerar.NewBinding("circle", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+		require.NoError(t, r.Set(shapeType, "circle", b))
+
+		slot, exist := r.FindSlot(shapeType, "circle")
+
+		assert.True(t, exist)
+		assert.Equal(t, registerar.Slot{Type: shapeType, Name: "circle"}, slot)
+	})
+
+	t.Run("returns_the_slot_of_the_implementation_of_an_interface", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		b := registerar.NewBinding("", false, nil, nil, func() *testCircle { return &testCircle{} }, nil)
+		require.NoError(t, r.Set(circleType, "", b))
+
+		slot, exist := r.FindSlot(shapeType, "")
+
+		assert.True(t, exist)
+		assert.Equal(t, registerar.Slot{Type: circleType}, slot, "the slot is the one of the concrete type")
+	})
+
+	t.Run("returns_nothing_when_no_binding_matches", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+
+		slot, exist := r.FindSlot(shapeType, "")
+
+		assert.False(t, exist)
+		assert.Equal(t, registerar.Slot{}, slot)
+	})
+}
+
+func TestRegistrar_Registrations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns_the_registrations_in_the_order_they_were_made", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		shapeType := reflect.TypeFor[testShape]()
+		dbType := reflect.TypeFor[testDatabase]()
+
+		bShape := registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+		bNamed := registerar.NewBinding("circle", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+		bDB := registerar.NewBinding("", false, nil, nil, func() testDatabase { return &testMySQL{} }, nil)
+
+		require.NoError(t, r.Set(shapeType, "", bShape))
+		require.NoError(t, r.Set(shapeType, "circle", bNamed))
+		require.NoError(t, r.Set(dbType, "", bDB))
+
+		assert.Equal(t, []registerar.Registration{
+			{Slot: registerar.Slot{Type: shapeType, Name: ""}, Binding: bShape},
+			{Slot: registerar.Slot{Type: shapeType, Name: "circle"}, Binding: bNamed},
+			{Slot: registerar.Slot{Type: dbType, Name: ""}, Binding: bDB},
+		}, r.Registrations())
+	})
+
+	t.Run("leaves_out_the_deleted_bindings", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		shapeType := reflect.TypeFor[testShape]()
+		dbType := reflect.TypeFor[testDatabase]()
+
+		bShape := registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+		bDB := registerar.NewBinding("", false, nil, nil, func() testDatabase { return &testMySQL{} }, nil)
+
+		require.NoError(t, r.Set(shapeType, "", bShape))
+		require.NoError(t, r.Set(dbType, "", bDB))
+		r.Delete(shapeType, "")
+
+		assert.Equal(t, []registerar.Registration{
+			{Slot: registerar.Slot{Type: dbType, Name: ""}, Binding: bDB},
+		}, r.Registrations())
+	})
+
+	t.Run("is_empty_after_a_reset", func(t *testing.T) {
+		t.Parallel()
+
+		r := registerar.NewRegisterar()
+		shapeType := reflect.TypeFor[testShape]()
+		require.NoError(t, r.Set(shapeType, "", registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{} }, nil)))
+
+		r.Reset()
+
+		assert.Empty(t, r.Registrations())
+	})
+}
+
+func TestSlot_String(t *testing.T) {
+	t.Parallel()
+
+	shapeType := reflect.TypeFor[testShape]()
+
+	assert.Equal(t, "registerar_test.testShape", registerar.Slot{Type: shapeType}.String())
+	assert.Equal(t, `registerar_test.testShape("circle")`, registerar.Slot{Type: shapeType, Name: "circle"}.String())
+	assert.Equal(t, "<unknown>", registerar.Slot{}.String())
+}
+
+func TestBinding_Dependencies(t *testing.T) {
+	t.Parallel()
+
+	shapeType := reflect.TypeFor[testShape]()
+	dbType := reflect.TypeFor[testDatabase]()
+
+	t.Run("returns_the_inputs_of_the_resolver", func(t *testing.T) {
+		t.Parallel()
+
+		b := registerar.NewBinding("", false, nil, nil, func(s testShape, d testDatabase) testShape { return s }, nil)
+
+		assert.Equal(t, []reflect.Type{shapeType, dbType}, b.Dependencies())
+	})
+
+	t.Run("leaves_out_the_inputs_the_bind_time_params_satisfy", func(t *testing.T) {
+		t.Parallel()
+
+		params := []reflect.Value{reflect.ValueOf(&testCircle{R: 1})}
+		b := registerar.NewBinding("", false, params, nil, func(s testShape, d testDatabase) testShape { return s }, nil)
+
+		assert.Equal(t, []reflect.Type{dbType}, b.Dependencies())
+	})
+
+	t.Run("uses_a_bind_time_param_once", func(t *testing.T) {
+		t.Parallel()
+
+		params := []reflect.Value{reflect.ValueOf(&testCircle{R: 1})}
+		b := registerar.NewBinding("", false, params, nil, func(a testShape, b testShape) testShape { return a }, nil)
+
+		assert.Equal(t, []reflect.Type{shapeType}, b.Dependencies())
+	})
+
+	t.Run("returns_nothing_for_a_resolver_without_inputs", func(t *testing.T) {
+		t.Parallel()
+
+		b := registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+
+		assert.Empty(t, b.Dependencies())
+	})
+}
+
+func TestBinding_DependencyNames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("yields_the_named_bindings_before_the_name_of_the_binding", func(t *testing.T) {
+		t.Parallel()
+
+		b := registerar.NewBinding("own", false, nil, []string{"first", "second"}, func() testShape { return &testCircle{} }, nil)
+
+		assert.Equal(t, []string{"first", "second", "own"}, slices.Collect(b.DependencyNames()))
+	})
+
+	t.Run("yields_the_name_of_the_binding_alone", func(t *testing.T) {
+		t.Parallel()
+
+		b := registerar.NewBinding("", false, nil, nil, func() testShape { return &testCircle{} }, nil)
+
+		assert.Equal(t, []string{""}, slices.Collect(b.DependencyNames()))
+	})
+
+	t.Run("stops_when_the_caller_stops", func(t *testing.T) {
+		t.Parallel()
+
+		b := registerar.NewBinding("own", false, nil, []string{"first", "second"}, func() testShape { return &testCircle{} }, nil)
+
+		var names []string
+		for name := range b.DependencyNames() {
+			names = append(names, name)
+			break
+		}
+
+		assert.Equal(t, []string{"first"}, names)
 	})
 }
