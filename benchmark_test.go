@@ -123,7 +123,9 @@ func BenchmarkResolve(b *testing.B) {
 		}
 	})
 
-	b.Run("interface_implementation_lookup", func(b *testing.B) {
+	// Resolve matches the type exactly, so a bound implementation of the abstraction
+	// does not answer for it: this is the cost of coming up empty handed.
+	b.Run("unbound_abstraction", func(b *testing.B) {
 		c := container.New()
 		_ = c.Bind(func() *Circle { return &Circle{a: 1} }, bind.Singleton())
 		b.ResetTimer()
@@ -159,6 +161,17 @@ func BenchmarkCall(b *testing.B) {
 	b.Run("one_dependency", func(b *testing.B) {
 		c := container.New()
 		_ = c.Bind(func() Shape { return &Circle{a: 1} }, bind.Singleton())
+		b.ResetTimer()
+		for b.Loop() {
+			_ = c.Call(func(s Shape) {})
+		}
+	})
+
+	// Arguments do fall back to a bound type implementing the wanted interface, which
+	// is the lookup this measures.
+	b.Run("interface_implementation_lookup", func(b *testing.B) {
+		c := container.New()
+		_ = c.Bind(func() *Circle { return &Circle{a: 1} }, bind.Singleton())
 		b.ResetTimer()
 		for b.Loop() {
 			_ = c.Call(func(s Shape) {})

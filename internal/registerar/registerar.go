@@ -3,20 +3,25 @@ package registerar
 import (
 	"reflect"
 	"sync"
-
-	"github.com/danceable/container/errors"
 )
 
-// Registrar manages binding registerations.
+// Registrar manages binding registerations. It is the way in to the store holding them
+// and to the acyclic guard deciding what may join it, and owns the lock the two are used
+// under.
 type Registrar struct {
-	bindings map[reflect.Type]map[string]*Binding
+	store store
 
 	mu sync.RWMutex
 }
 
 // NewRegisterar creates and returns a new Registrar instance.
 func NewRegisterar() *Registrar {
-	return &Registrar{bindings: make(map[reflect.Type]map[string]*Binding)}
+	return &Registrar{store: newStore()}
+}
+
+// guard returns the acyclic guard over the registrations.
+func (r *Registrar) guard() acyclic {
+	return acyclic{store: &r.store}
 }
 
 // Reset clears all bindings.
@@ -24,7 +29,7 @@ func (r *Registrar) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.bindings = make(map[reflect.Type]map[string]*Binding)
+	r.store.reset()
 }
 
 // Delete removes the binding by exact type match.
@@ -32,9 +37,7 @@ func (r *Registrar) Delete(t reflect.Type, name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if named, ok := r.bindings[t]; ok {
-		delete(named, name)
-	}
+	r.store.delete(t, name)
 }
 
 // Get retrieves a binding by exact type match.
@@ -42,13 +45,7 @@ func (r *Registrar) Get(t reflect.Type, name string) (*Binding, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	if named, bindingExists := r.bindings[t]; bindingExists {
-		if b, ok := named[name]; ok {
-			return b, true
-		}
-	}
-
-	return nil, false
+	return r.store.get(t, name)
 }
 
 // Find retrieves a binding by exact type match, falling back to interface-implementation lookup.
@@ -56,24 +53,35 @@ func (r *Registrar) Find(abstraction reflect.Type, name string) (*Binding, bool)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	return r.find(abstraction, name)
+	return r.store.find(abstraction, name)
 }
 
-// Set checks for a circular dependency and, if none is found, atomically stores the binding.
+// FindSlot is like Find but returns the slot holding the match instead of the binding.
+func (r *Registrar) FindSlot(abstraction reflect.Type, name string) (Slot, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	slot, _, exist := r.store.lookup(abstraction, name)
+
+	return slot, exist
+}
+
+// Registrations returns a snapshot of every registration, in the order the slots were
+// first registered.
+func (r *Registrar) Registrations() []Registration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.store.registrations()
+}
+
+// Set stores the binding, refusing it when the registration would introduce a
+// circular dependency.
 func (r *Registrar) Set(t reflect.Type, name string, b *Binding) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.hasCircularDependencies(t, name, b) {
-		return errors.ErrCircularDependency
-	}
-
-	if _, exist := r.bindings[t]; !exist {
-		r.bindings[t] = make(map[string]*Binding)
-	}
-	r.bindings[t][name] = b
-
-	return nil
+	return r.guard().set(Slot{t, name}, b)
 }
 
 // SetIfAbsent is like Set but only stores b when the slot is currently empty.
@@ -82,113 +90,14 @@ func (r *Registrar) SetIfAbsent(t reflect.Type, name string, b *Binding) (wasNew
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if named, ok := r.bindings[t]; ok {
-		if _, ok2 := named[name]; ok2 {
-			return false, nil
-		}
+	slot := Slot{t, name}
+	if r.store.taken(slot) {
+		return false, nil
 	}
 
-	if r.hasCircularDependencies(t, name, b) {
-		return false, errors.ErrCircularDependency
+	if err := r.guard().set(slot, b); err != nil {
+		return false, err
 	}
-
-	if _, exist := r.bindings[t]; !exist {
-		r.bindings[t] = make(map[string]*Binding)
-	}
-
-	r.bindings[t][name] = b
 
 	return true, nil
-}
-
-// find retrieves a binding by exact type match, falling back to interface-implementation lookup.
-func (r *Registrar) find(abstraction reflect.Type, name string) (*Binding, bool) {
-	if named, bindingExists := r.bindings[abstraction]; bindingExists {
-		if b, ok := named[name]; ok {
-			return b, true
-		}
-	}
-
-	if abstraction.Kind() == reflect.Interface {
-		for boundType, namedConcretes := range r.bindings {
-			if boundType.Implements(abstraction) {
-				if b, ok := namedConcretes[name]; ok {
-					return b, true
-				}
-			}
-		}
-	}
-
-	return nil, false
-}
-
-// hasCircularDependencies checks if the resolver function for a binding would introduce a circular dependency.
-func (r *Registrar) hasCircularDependencies(outType reflect.Type, name string, b *Binding) bool {
-	type node struct {
-		t    reflect.Type
-		name string
-	}
-	visited := map[node]bool{}
-
-	var dfs func(typ reflect.Type, depName string) bool
-	dfs = func(typ reflect.Type, depName string) bool {
-		if typ == outType && depName == name {
-			return true // reached the slot we are about to occupy — cycle confirmed
-		}
-
-		n := node{typ, depName}
-		if visited[n] {
-			return false
-		}
-		visited[n] = true
-
-		b, exists := r.find(typ, depName)
-		if !exists {
-			return false
-		}
-
-		for _, in := range unsatisfiedInputs(b) {
-			if dfs(in, "") {
-				return true
-			}
-		}
-
-		return false
-	}
-
-	for _, in := range unsatisfiedInputs(b) {
-		if dfs(in, "") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// unsatisfiedInputs returns the resolver input types not satisfied by the binding's bindParams.
-func unsatisfiedInputs(b *Binding) []reflect.Type {
-	rt := reflect.TypeOf(b.resolver)
-	used := make([]bool, len(b.bindParams))
-	var inputs []reflect.Type
-
-	for in := range rt.Ins() {
-		matched := false
-		for i, param := range b.bindParams {
-			if used[i] {
-				continue
-			}
-
-			if param.Type().AssignableTo(in) {
-				used[i] = true
-				matched = true
-				break
-			}
-		}
-
-		if !matched {
-			inputs = append(inputs, in)
-		}
-	}
-
-	return inputs
 }

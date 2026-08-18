@@ -50,6 +50,19 @@ func TestContainer_Reset(t *testing.T) {
 func TestContainer_Bind(t *testing.T) {
 	t.Parallel()
 
+	t.Run("nil_resolver_returns_error", func(t *testing.T) {
+		t.Parallel()
+
+		c := container.New()
+
+		assert.ErrorIs(t, c.Bind(nil), containerErrors.ErrNonFunctionResolver)
+		assert.ErrorIs(t, c.Bind(nil, bind.Singleton()), containerErrors.ErrNonFunctionResolver)
+
+		// A nil func value has a signature but nothing to call.
+		var resolver func() Shape
+		assert.ErrorIs(t, c.Bind(resolver), containerErrors.ErrNonFunctionResolver)
+	})
+
 	t.Run("singleton", func(t *testing.T) {
 		t.Parallel()
 
@@ -414,6 +427,29 @@ func TestContainer_Bind(t *testing.T) {
 func TestContainer_Call(t *testing.T) {
 	t.Parallel()
 
+	t.Run("single_non_error_return_is_an_invalid_signature", func(t *testing.T) {
+		t.Parallel()
+
+		// Saying so must not depend on the returned value being one that can be nil.
+		c := container.New()
+
+		assert.ErrorIs(t, c.Call(func() int { return 5 }), containerErrors.ErrInvalidFunctionSignature)
+		assert.ErrorIs(t, c.Call(func() string { return "" }), containerErrors.ErrInvalidFunctionSignature)
+		assert.ErrorIs(t, c.Call(func() struct{ A int } { return struct{ A int }{} }), containerErrors.ErrInvalidFunctionSignature)
+		assert.ErrorIs(t, c.Call(func() bool { return false }), containerErrors.ErrInvalidFunctionSignature)
+	})
+
+	t.Run("returns_an_error_of_a_value_type", func(t *testing.T) {
+		t.Parallel()
+
+		// The error a receiver returns does not have to be nilable.
+		c := container.New()
+
+		err := c.Call(func() error { return valueError{} })
+
+		assert.ErrorIs(t, err, valueError{})
+	})
+
 	t.Run("resolves_multiple_dependencies", func(t *testing.T) {
 		t.Parallel()
 
@@ -568,6 +604,18 @@ func TestContainer_Call(t *testing.T) {
 
 func TestContainer_Resolve(t *testing.T) {
 	t.Parallel()
+
+	t.Run("nil_pointer_returns_invalid_abstraction", func(t *testing.T) {
+		t.Parallel()
+
+		// A nil pointer is a pointer, but there is nothing at the end of it to fill.
+		c := container.New()
+		require.NoError(t, c.Bind(func() Shape { return &Circle{a: 5} }, bind.Singleton(), bind.Lazy()))
+
+		var receiver *Shape
+		assert.ErrorIs(t, c.Resolve(receiver), containerErrors.ErrInvalidAbstraction)
+		assert.ErrorIs(t, c.Resolve((*Database)(nil)), containerErrors.ErrInvalidAbstraction)
+	})
 
 	t.Run("fills_pointer_to_interface", func(t *testing.T) {
 		t.Parallel()
@@ -875,6 +923,21 @@ func TestContainer_Resolve(t *testing.T) {
 
 func TestContainer_Fill(t *testing.T) {
 	t.Parallel()
+
+	t.Run("nil_pointer_returns_invalid_structure", func(t *testing.T) {
+		t.Parallel()
+
+		// A nil pointer to a struct has no fields to fill.
+		type app struct {
+			S Shape `container:"type"`
+		}
+
+		c := container.New()
+		require.NoError(t, c.Bind(func() Shape { return &Circle{a: 5} }, bind.Singleton(), bind.Lazy()))
+
+		var receiver *app
+		assert.ErrorIs(t, c.Fill(receiver), containerErrors.ErrInvalidStructure)
+	})
 
 	t.Run("fills_tagged_struct_fields_by_type", func(t *testing.T) {
 		t.Parallel()
@@ -1658,6 +1721,53 @@ func TestDeadlockAndCircularLock(t *testing.T) {
 		assert.Equal(t, "running", svc.Run())
 	})
 
+	// ── Eager singleton construction ───────────────────────────────────────────────
+
+	t.Run("eager_singleton_is_built_once_when_resolved_concurrently", func(t *testing.T) {
+		t.Parallel()
+		// Bind registers an eager singleton before its resolver runs, so a Resolve arriving
+		// in between must wait for that instance rather than build a second one.
+		c := container.New()
+
+		var (
+			calls     atomic.Int32
+			building  = make(chan struct{}) // the resolver is running
+			resolving = make(chan struct{}) // the Resolve is under way
+			once      sync.Once
+		)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			assert.NoError(t, c.Bind(func() Shape {
+				n := calls.Add(1)
+				once.Do(func() { close(building) })
+				<-resolving
+				time.Sleep(50 * time.Millisecond) // long enough to reach the binding
+
+				return &Circle{a: int(n)}
+			}, bind.Singleton()))
+		}()
+
+		var resolved Shape
+		go func() {
+			defer wg.Done()
+			<-building
+			close(resolving)
+			assert.NoError(t, c.Resolve(&resolved))
+		}()
+
+		withDeadline(t, wg.Wait)
+
+		var stored Shape
+		require.NoError(t, c.Resolve(&stored))
+
+		assert.Equal(t, int32(1), calls.Load(), "the resolver of a singleton must run once")
+		assert.Same(t, stored, resolved, "every resolve of a singleton must return the same instance")
+	})
+
 	// ── TOCTOU: concurrent Bind of a mutual cycle ──────────────────────────────────
 
 	t.Run("concurrent_mutual_cycle_exactly_one_bind_fails", func(t *testing.T) {
@@ -2229,6 +2339,18 @@ func TestSlowResolverConcurrency(t *testing.T) {
 
 func TestContainer_Scope(t *testing.T) {
 	t.Parallel()
+
+	t.Run("name_reports_the_name_of_the_scope", func(t *testing.T) {
+		t.Parallel()
+
+		root := container.New()
+		child := root.Scope("child")
+
+		assert.Equal(t, "", root.Name(), "a root scope has no name")
+		assert.Equal(t, "child", child.Name())
+		assert.Equal(t, "grandchild", child.Scope("grandchild").Name())
+		assert.Equal(t, "", root.Derive().Name(), "a derived scope is anonymous")
+	})
 
 	t.Run("creates_child_with_shared_root", func(t *testing.T) {
 		t.Parallel()

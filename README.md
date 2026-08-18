@@ -21,7 +21,8 @@ Features:
 - Optional lazy loading of bindings
 - Global instance for small applications
 - Concurrency-safe with no race conditions
-- Basic circular dependency detection
+- Circular dependency detection, backed by a graph of the bindings
+- Dependency graph visualization in the Graphviz DOT format
 - Bind-time and resolve-time parameter injection
 - 100% Test coverage!
 
@@ -299,6 +300,10 @@ When a resolver function has arguments, the container resolves them using multip
 3. **Named bindings** (`bind.ResolveDependenciesByNamedBindings()`) — values pulled from named container entries.
 4. **Container lookup** — the default unnamed binding for the matching type.
 
+A resolver argument of an interface type falls back to a bound type that implements it when the interface itself is not bound. When several bound types implement it, the one registered first answers — every time, so the same argument never resolves to a different binding from one call to the next.
+
+`Resolve()` and `Fill()` do not fall back this way: they match the type exactly, so `Resolve(&shape)` needs a binding for `Shape` itself and does not settle for a bound `*Circle` that implements it. Bind the abstraction when you want it resolved directly.
+
 ```go
 c := container.New()
 
@@ -325,6 +330,62 @@ c.Resolve(&db)
 c.Resolve(&db, resolve.WithParams(42, &Circle{Area: 77}))
 ```
 
+#### Circular Dependency Detection
+
+The container keeps the registrations of a scope as a directed graph: every binding is a node, and every dependency it cannot satisfy on its own is an edge pointing at the binding that satisfies it. `Bind()` walks that graph from the binding it is about to register, and refuses it when the walk leads back to where it started — so a cycle is caught at bind time, before anything is ever built. The error tells you the path of the cycle:
+
+```go
+c := container.New()
+
+c.Bind(func(d Database) Shape { return &Circle{} }, bind.Lazy())        // fine: no Database is registered yet
+err := c.Bind(func(s Shape) Database { return &MySQL{} }, bind.Lazy())  // closes the loop
+
+errors.Is(err, containerErrors.ErrCircularDependency) // true
+err.Error() // "container: circular dependency detected: main.Database -> main.Shape -> main.Database"
+```
+
+The graph only holds the dependencies the container actually resolves. Arguments supplied at bind time with `bind.ResolveDepenenciesByParams()` are not edges, so they break a cycle instead of forming one, and edges follow the same lookup the container performs at resolve time — the named bindings given with `bind.ResolveDependenciesByNamedBindings()` first, then the name of the binding itself. A refused binding is rolled back: the container is left exactly as it was.
+
+#### Visualizing the Dependency Graph
+
+`Visualize()` writes the same graph in the [Graphviz](https://graphviz.org) DOT format, which is handy for seeing what an application actually wired up:
+
+```go
+var buf bytes.Buffer
+if err := c.Visualize(&buf); err != nil {
+    log.Fatal(err)
+}
+
+os.WriteFile("container.dot", buf.Bytes(), 0o600)
+// dot -Tsvg container.dot -o container.svg
+```
+
+```dot
+digraph container {
+	rankdir = LR;
+	node [shape = box, style = rounded, fontname = "Helvetica"];
+	edge [fontname = "Helvetica"];
+
+	subgraph cluster_0 {
+		label = "root";
+
+		n0 [label = "main.Database\nsingleton, resolved"];
+		n1 [label = "main.Shape\ntransient"];
+	}
+
+	subgraph cluster_1 {
+		label = "scope \"request\"";
+
+		n2 [label = "main.Logger\nsingleton"];
+	}
+
+	n1 -> n0;
+	n2 -> n0;
+}
+```
+
+Every binding becomes a node labelled with what it provides and how — named or not, singleton or transient, already built or not — and every dependency becomes an edge. Each scope becomes a cluster, and edges cross them: the graph covers the scope it is called on, the ancestors it resolves from, and its named descendants. A dependency no binding satisfies — one passed at resolve time, or a missing one — is drawn dashed.
+
 #### Container Methods
 
 | Method | Signature | Description |
@@ -338,6 +399,7 @@ c.Resolve(&db, resolve.WithParams(42, &Circle{Area: 77}))
 | `Resolve` | `Resolve(abstraction any, opts ...resolve.ResolveOption) error` | Fills a pointer-to-interface (or pointer-to-type) with the matching concrete from the container. |
 | `Call` | `Call(function any, opts ...resolve.ResolveOption) error` | Invokes a function whose parameters are automatically resolved from the container. The function may optionally return an `error`. |
 | `Fill` | `Fill(structure any, opts ...resolve.ResolveOption) error` | Injects dependencies into struct fields tagged with `container:"type"` or `container:"name"`. |
+| `Visualize` | `Visualize(w io.Writer) error` | Writes the dependency graph of the container to `w` in the Graphviz DOT format. |
 | `Reset` | `Reset()` | Removes all bindings and empties the container. |
 
 Each method also has a `Must` variant (`MustBind`, `MustResolve`, `MustCall`, `MustFill`) that panics on error instead of returning it:
@@ -360,7 +422,7 @@ Options passed to `Bind()` to configure how a binding behaves.
 | `bind.Lazy()` | Defers resolver invocation until the binding is first resolved. Without this, the resolver runs eagerly at bind time. |
 | `bind.WithName(name)` | Assigns a name to the binding, allowing multiple concretes for the same abstraction. |
 | `bind.ResolveDepenenciesByParams(params...)` | Provides concrete values at bind time to satisfy the resolver's arguments (matched by type). |
-| `bind.ResolveDependenciesByNamedBindings(names...)` | Specifies named bindings to use when resolving the resolver's arguments (matched positionally). |
+| `bind.ResolveDependenciesByNamedBindings(names...)` | Specifies named bindings to use when resolving the resolver's arguments. Each argument takes the first of these names that has a binding for its type. |
 
 ```go
 c.Bind(func() Database {

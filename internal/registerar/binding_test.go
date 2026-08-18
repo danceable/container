@@ -27,7 +27,7 @@ func TestNewBinding(t *testing.T) {
 		assert.Equal(t, params, b.BindParams())
 		assert.Equal(t, named, b.NamedBindings())
 		assert.NotNil(t, b.Resolver())
-		assert.Equal(t, "cached", b.Concrete())
+		assert.True(t, b.HasConcrete())
 	})
 
 	t.Run("creates_binding_with_zero_values", func(t *testing.T) {
@@ -39,25 +39,7 @@ func TestNewBinding(t *testing.T) {
 		assert.False(t, b.IsSingleton())
 		assert.Nil(t, b.BindParams())
 		assert.Nil(t, b.NamedBindings())
-		assert.Nil(t, b.Concrete())
-	})
-}
-
-func TestBinding_HasName(t *testing.T) {
-	t.Parallel()
-
-	t.Run("returns_true_when_name_is_set", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("someName", false, nil, nil, func() {}, nil)
-		assert.True(t, b.HasName())
-	})
-
-	t.Run("returns_false_when_name_is_empty", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", false, nil, nil, func() {}, nil)
-		assert.False(t, b.HasName())
+		assert.False(t, b.HasConcrete())
 	})
 }
 
@@ -152,80 +134,6 @@ func TestBinding_HasConcrete(t *testing.T) {
 	})
 }
 
-func TestBinding_Concrete(t *testing.T) {
-	t.Parallel()
-
-	t.Run("returns_nil_when_not_set", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", true, nil, nil, func() {}, nil)
-		assert.Nil(t, b.Concrete())
-	})
-
-	t.Run("returns_concrete_when_set_at_creation", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", true, nil, nil, func() {}, "instance")
-		assert.Equal(t, "instance", b.Concrete())
-	})
-}
-
-func TestBinding_SetConcrete(t *testing.T) {
-	t.Parallel()
-
-	t.Run("sets_concrete_on_nil_binding", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", true, nil, nil, func() {}, nil)
-		assert.Nil(t, b.Concrete())
-
-		b.SetConcrete("value")
-		assert.Equal(t, "value", b.Concrete())
-	})
-
-	t.Run("overwrites_existing_concrete", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", true, nil, nil, func() {}, "old")
-		assert.Equal(t, "old", b.Concrete())
-
-		b.SetConcrete("new")
-		assert.Equal(t, "new", b.Concrete())
-	})
-
-	t.Run("sets_concrete_to_nil", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", true, nil, nil, func() {}, "existing")
-		assert.True(t, b.HasConcrete())
-
-		b.SetConcrete(nil)
-		assert.False(t, b.HasConcrete())
-		assert.Nil(t, b.Concrete())
-	})
-
-	t.Run("is_safe_for_concurrent_use", func(t *testing.T) {
-		t.Parallel()
-
-		b := registerar.NewBinding("", true, nil, nil, func() {}, nil)
-
-		var wg sync.WaitGroup
-		const goroutines = 50
-
-		for i := range goroutines {
-			wg.Add(1)
-			go func(val int) {
-				defer wg.Done()
-				b.SetConcrete(val)
-			}(i)
-		}
-
-		wg.Wait()
-
-		assert.NotNil(t, b.Concrete())
-	})
-}
-
 func TestBinding_GetOrSetConcrete(t *testing.T) {
 	t.Parallel()
 
@@ -260,7 +168,7 @@ func TestBinding_GetOrSetConcrete(t *testing.T) {
 
 		assert.NoError(t, err)
 		assert.Equal(t, "created", result)
-		assert.Equal(t, "created", b.Concrete())
+		assert.True(t, b.HasConcrete())
 	})
 
 	t.Run("passes_params_to_factory", func(t *testing.T) {

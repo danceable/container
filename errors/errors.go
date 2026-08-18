@@ -36,6 +36,7 @@ var (
 	// ErrCannotMakeField is returned when a field with the `container` tag cannot be made.
 	ErrCannotMakeField = errors.New("container: cannot make field")
 
-	// ErrCircularDependency is returned when a circular dependency is detected during singleton initialization.
+	// ErrCircularDependency is returned when registering a binding would close a cycle in
+	// the dependency graph. The error names the path of the cycle.
 	ErrCircularDependency = errors.New("container: circular dependency detected")
 )

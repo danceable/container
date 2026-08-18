@@ -1,6 +1,8 @@
 package container
 
 import (
+	"io"
+
 	"github.com/danceable/container/bind"
 	"github.com/danceable/container/resolve"
 )
@@ -41,4 +43,9 @@ func Resolve(abstraction any, opts ...resolve.ResolveOption) error {
 // Fill calls the same method of the default concrete.
 func Fill(receiver any, opts ...resolve.ResolveOption) error {
 	return Default.Fill(receiver, opts...)
+}
+
+// Visualize calls the same method of the default concrete.
+func Visualize(w io.Writer) error {
+	return Default.Visualize(w)
 }
