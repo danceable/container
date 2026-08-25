@@ -267,15 +267,15 @@ func TestContainer_Bind(t *testing.T) {
 			t.Parallel()
 
 			c := container.New()
-			var callCount int64
+			var callCount atomic.Int64
 			resolver := func() Shape {
-				atomic.AddInt64(&callCount, 1)
+				callCount.Add(1)
 				return &Circle{a: 1}
 			}
 			require.NoError(t, c.Bind(resolver, bind.Singleton()))
 			require.NoError(t, c.Bind(resolver, bind.Singleton())) // second bind should be no-op
 
-			assert.Equal(t, int64(1), atomic.LoadInt64(&callCount))
+			assert.Equal(t, int64(1), callCount.Load())
 		})
 	})
 
@@ -1453,10 +1453,10 @@ func TestRaceConditions(t *testing.T) {
 	t.Run("eager_singleton_concurrent_bind_invokes_resolver_multiple_times", func(t *testing.T) {
 		t.Parallel()
 
-		var callCount int64
+		var callCount atomic.Int64
 
 		resolver := func() Shape {
-			atomic.AddInt64(&callCount, 1)
+			callCount.Add(1)
 			time.Sleep(20 * time.Millisecond) // widen the race window so both goroutines overlap
 			return &Circle{a: 42}
 		}
@@ -1477,9 +1477,9 @@ func TestRaceConditions(t *testing.T) {
 
 		// Expected: 1  (singleton resolver should run at most once)
 		// Actual:   2  (both goroutines entered c.invoke() before either held c.lock)
-		assert.Equal(t, int64(1), atomic.LoadInt64(&callCount),
+		assert.Equal(t, int64(1), callCount.Load(),
 			"eager singleton resolver was invoked %d times; expected exactly 1",
-			atomic.LoadInt64(&callCount))
+			callCount.Load())
 	})
 
 	// Race #2 – lazy singleton: write lock held on every read after initialisation.
@@ -1596,21 +1596,21 @@ func TestRaceConditions(t *testing.T) {
 
 		const goroutines = 50
 		var wg sync.WaitGroup
-		var count int64
+		var count atomic.Int64
 		wg.Add(goroutines)
 
 		for range goroutines {
 			go func() {
 				defer wg.Done()
 				assert.NoError(t, c.Call(func(s Shape) {
-					atomic.AddInt64(&count, 1)
+					count.Add(1)
 					assert.Equal(t, 5, s.GetArea())
 				}))
 			}()
 		}
 
 		wg.Wait()
-		assert.Equal(t, int64(goroutines), atomic.LoadInt64(&count))
+		assert.Equal(t, int64(goroutines), count.Load())
 	})
 
 	t.Run("concurrent_mixed_bind_resolve_fill_call", func(t *testing.T) {
@@ -1968,9 +1968,9 @@ func TestDeadlockAndCircularLock(t *testing.T) {
 		// simultaneously. Exactly one resolver invocation must occur and all goroutines
 		// must receive the same pointer.
 		c := container.New()
-		var calls int64
+		var calls atomic.Int64
 		require.NoError(t, c.Bind(func() Shape {
-			atomic.AddInt64(&calls, 1)
+			calls.Add(1)
 			return &Circle{a: 99}
 		}, bind.Lazy(), bind.Singleton()))
 
@@ -1993,7 +1993,7 @@ func TestDeadlockAndCircularLock(t *testing.T) {
 		close(ready)
 		withDeadline(t, wg.Wait)
 
-		assert.Equal(t, int64(1), atomic.LoadInt64(&calls), "resolver must be invoked exactly once")
+		assert.Equal(t, int64(1), calls.Load(), "resolver must be invoked exactly once")
 		for _, inst := range instances[1:] {
 			assert.Same(t, instances[0].(*Circle), inst.(*Circle))
 		}
@@ -2295,10 +2295,10 @@ func TestSlowResolverConcurrency(t *testing.T) {
 			goroutines = 20
 		)
 
-		var callCount int64
+		var callCount atomic.Int64
 		c := container.New()
 		require.NoError(t, c.Bind(func() Shape {
-			atomic.AddInt64(&callCount, 1)
+			callCount.Add(1)
 			time.Sleep(slowDelay)
 			return &Circle{a: 42}
 		}, bind.Singleton(), bind.Lazy()))
@@ -2328,7 +2328,7 @@ func TestSlowResolverConcurrency(t *testing.T) {
 			t.Fatal("deadlock during concurrent slow singleton resolution")
 		}
 
-		assert.Equal(t, int64(1), atomic.LoadInt64(&callCount),
+		assert.Equal(t, int64(1), callCount.Load(),
 			"slow singleton resolver must be invoked exactly once")
 		for _, inst := range instances[1:] {
 			assert.Same(t, instances[0].(*Circle), inst.(*Circle),

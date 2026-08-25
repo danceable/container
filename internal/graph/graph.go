@@ -4,6 +4,8 @@
 // through the Graph interface by numbering its nodes.
 package graph
 
+import "slices"
+
 // Graph is a directed graph whose nodes are the integers in the range [0, Order).
 type Graph interface {
 	// Order returns the number of nodes in the graph.
@@ -107,8 +109,8 @@ func (v visit) walk(g Graph, u int, path []int) []int {
 // spell it out.
 func closeCycle(path []int, w int) []int {
 	start := 0
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == w {
+	for i, p := range slices.Backward(path) {
+		if p == w {
 			start = i
 			break
 		}
