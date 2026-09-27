@@ -3,12 +3,16 @@ package container_test
 import (
 	"bytes"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/danceable/container"
 	"github.com/danceable/container/bind"
+	"github.com/danceable/container/visualize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,8 +51,8 @@ func requireEdge(t *testing.T, dot, from, to string) string {
 	return ""
 }
 
-// visualize renders the container and returns the DOT output.
-func visualize(t *testing.T, c *container.Container) string {
+// render renders the container and returns the DOT output.
+func render(t *testing.T, c *container.Container) string {
 	t.Helper()
 
 	var buf bytes.Buffer
@@ -63,7 +67,7 @@ func TestContainer_Visualize(t *testing.T) {
 	t.Run("empty_container_renders_an_empty_graph", func(t *testing.T) {
 		t.Parallel()
 
-		dot := visualize(t, container.New())
+		dot := render(t, container.New())
 
 		assert.True(t, strings.HasPrefix(dot, "digraph container {\n"))
 		assert.True(t, strings.HasSuffix(dot, "}\n"))
@@ -78,7 +82,7 @@ func TestContainer_Visualize(t *testing.T) {
 		require.NoError(t, c.Bind(func() Logger { return StdLogger{} }, bind.Singleton()))
 		require.NoError(t, c.Bind(func() Shape { return &Circle{a: 1} }, bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 
 		assert.Contains(t, dot, "subgraph cluster_0 {")
 		assert.Contains(t, dot, `label = "root";`)
@@ -93,7 +97,7 @@ func TestContainer_Visualize(t *testing.T) {
 		c := container.New()
 		require.NoError(t, c.Bind(func() Shape { return &Circle{a: 1} }, bind.WithName("circle"), bind.Singleton(), bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 
 		assert.Contains(t, dot, `label = "container_test.Shape(\"circle\")\nsingleton"`)
 	})
@@ -106,7 +110,7 @@ func TestContainer_Visualize(t *testing.T) {
 		require.NoError(t, c.Bind(func(l Logger) Shape { return &Circle{a: 1} }, bind.Lazy()))
 		require.NoError(t, c.Bind(func(l Logger, s Shape) Database { return MySQL{} }, bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 		n := nodes(t, dot)
 
 		requireEdge(t, dot, n["container_test.Shape"], n["container_test.Logger"])
@@ -121,7 +125,7 @@ func TestContainer_Visualize(t *testing.T) {
 		require.NoError(t, c.Bind(func(area int) Shape { return &Circle{a: area} }, bind.Lazy(), bind.ResolveDepenenciesByParams(10)))
 		require.NoError(t, c.Bind(func(missing Logger) Database { return MySQL{} }, bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 		n := nodes(t, dot)
 
 		// The int is supplied at bind time, so it is not a dependency at all.
@@ -139,7 +143,7 @@ func TestContainer_Visualize(t *testing.T) {
 		require.NoError(t, c.Bind(func(l Logger) Shape { return &Circle{a: 1} }, bind.Lazy()))
 		require.NoError(t, c.Bind(func(l Logger) Database { return MySQL{} }, bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 		n := nodes(t, dot)
 
 		assert.Equal(t, 1, strings.Count(dot, "unsatisfied"))
@@ -156,7 +160,7 @@ func TestContainer_Visualize(t *testing.T) {
 		request := c.Scope("request")
 		require.NoError(t, request.Bind(func(d Database) Service { return AppService{} }, bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 		n := nodes(t, dot)
 
 		assert.Contains(t, dot, `label = "root";`)
@@ -174,7 +178,7 @@ func TestContainer_Visualize(t *testing.T) {
 		request := c.Scope("request")
 		require.NoError(t, request.Bind(func(d Database) Service { return AppService{} }, bind.Lazy()))
 
-		dot := visualize(t, request)
+		dot := render(t, request)
 		n := nodes(t, dot)
 
 		// The parent is drawn as well, so the dependency has somewhere to point at.
@@ -189,7 +193,7 @@ func TestContainer_Visualize(t *testing.T) {
 		c.Scope("empty")
 		require.NoError(t, c.Bind(func() Shape { return &Circle{a: 1} }, bind.Lazy()))
 
-		dot := visualize(t, c)
+		dot := render(t, c)
 
 		assert.NotContains(t, dot, `label = "scope \"empty\"";`)
 		assert.Equal(t, 1, strings.Count(dot, "subgraph"))
@@ -206,8 +210,8 @@ func TestContainer_Visualize(t *testing.T) {
 			require.NoError(t, c.Scope(name).Bind(func(l Logger) Cache { return InMemoryCache{} }, bind.Lazy()))
 		}
 
-		dot := visualize(t, c)
-		assert.Equal(t, dot, visualize(t, c), "the same container must render the same graph")
+		dot := render(t, c)
+		assert.Equal(t, dot, render(t, c), "the same container must render the same graph")
 
 		// The scopes are ordered by name, not by the order they were created in.
 		assert.Less(t, strings.Index(dot, `scope \"a\"`), strings.Index(dot, `scope \"b\"`))
@@ -225,6 +229,81 @@ func TestContainer_Visualize(t *testing.T) {
 	})
 }
 
+func TestContainer_VisualizeWithRenderer(t *testing.T) {
+	t.Parallel()
+
+	c := container.New()
+	require.NoError(t, c.Bind(func() Logger { return StdLogger{} }, bind.Singleton(), bind.Lazy()))
+	require.NoError(t, c.Bind(func(l Logger) Shape { return &Circle{a: 1} }, bind.Lazy()))
+
+	var buf bytes.Buffer
+	require.NoError(t, c.Visualize(&buf, visualize.WithRenderer(visualize.ASCII{})))
+
+	assert.Equal(t, "root\n"+
+		"|-- container_test.Logger (singleton)\n"+
+		"`-- container_test.Shape (transient)\n"+
+		"    `-> container_test.Logger\n", buf.String())
+
+	// A nil renderer keeps the default one.
+	buf.Reset()
+	require.NoError(t, c.Visualize(&buf, visualize.WithRenderer(nil)))
+	assert.True(t, strings.HasPrefix(buf.String(), "digraph container {\n"))
+}
+
+func TestContainer_VisualizeHandler(t *testing.T) {
+	t.Parallel()
+
+	serve := func(h http.Handler) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/container", nil))
+
+		return rec
+	}
+
+	c := container.New()
+	require.NoError(t, c.Bind(func() Shape { return &Circle{a: 1} }, bind.Lazy()))
+
+	t.Run("serves_an_html_page_by_default", func(t *testing.T) {
+		t.Parallel()
+
+		rec := serve(c.VisualizeHandler())
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.Contains(t, rec.Body.String(), "<!doctype html>")
+		assert.Contains(t, rec.Body.String(), "container_test.Shape (transient)")
+	})
+
+	t.Run("serves_what_the_renderer_given_draws", func(t *testing.T) {
+		t.Parallel()
+
+		rec := serve(c.VisualizeHandler(visualize.WithRenderer(visualize.DOT{})))
+
+		assert.Equal(t, "text/vnd.graphviz; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.True(t, strings.HasPrefix(rec.Body.String(), "digraph container {\n"))
+	})
+
+	t.Run("draws_the_bindings_of_the_moment", func(t *testing.T) {
+		t.Parallel()
+
+		c := container.New()
+		h := c.VisualizeHandler(visualize.WithRenderer(visualize.ASCII{}))
+		assert.Equal(t, "(empty graph)\n", serve(h).Body.String())
+
+		require.NoError(t, c.Bind(func() Shape { return &Circle{a: 1} }, bind.Lazy()))
+		assert.Contains(t, serve(h).Body.String(), "container_test.Shape")
+	})
+
+	t.Run("answers_with_an_error_when_the_renderer_fails", func(t *testing.T) {
+		t.Parallel()
+
+		rec := serve(c.VisualizeHandler(visualize.WithRenderer(failingRenderer{})))
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Contains(t, rec.Body.String(), errWriteFailed.Error())
+	})
+}
+
 func TestVisualize(t *testing.T) {
 	container.Reset()
 	defer container.Reset()
@@ -235,6 +314,10 @@ func TestVisualize(t *testing.T) {
 	require.NoError(t, container.Visualize(&buf))
 
 	assert.Contains(t, buf.String(), `label = "container_test.Shape\ntransient"`)
+
+	rec := httptest.NewRecorder()
+	container.VisualizeHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Contains(t, rec.Body.String(), "container_test.Shape (transient)")
 }
 
 // errWriteFailed is the error the failingWriter fails with.
@@ -245,4 +328,15 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errWriteFailed
+}
+
+// failingRenderer is a visualize.Renderer that fails on every graph.
+type failingRenderer struct{}
+
+func (failingRenderer) Render(io.Writer, visualize.Graph) error {
+	return errWriteFailed
+}
+
+func (failingRenderer) ContentType() string {
+	return "text/plain"
 }

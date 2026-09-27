@@ -1,8 +1,4 @@
-// Package dot renders directed graphs in the Graphviz DOT language.
-//
-// It knows the syntax and nothing about what is being drawn: callers describe their
-// graph with the model below and stay free of DOT quoting and attribute rules.
-package dot
+package visualize
 
 import (
 	"fmt"
@@ -11,45 +7,17 @@ import (
 	"strings"
 )
 
-// Style is how a node or an edge is drawn.
-type Style uint8
+// DOT renders graphs in the Graphviz DOT language:
+//
+//	dot -Tsvg container.dot -o container.svg
+type DOT struct{}
 
-const (
-	Solid Style = iota
-	Dashed
-	Highlighted
-)
-
-// Node is a single box, identified by a number unique within the Graph.
-type Node struct {
-	ID    int
-	Label string
-	Style Style
+func (DOT) ContentType() string {
+	return "text/vnd.graphviz; charset=utf-8"
 }
 
-// Cluster is a group of nodes drawn in a labelled box of its own.
-type Cluster struct {
-	Label string
-	Nodes []Node
-}
-
-// Edge points from one node to another.
-type Edge struct {
-	From  int
-	To    int
-	Style Style
-}
-
-// Graph is a directed graph ready to be rendered.
-type Graph struct {
-	Name     string
-	Clusters []Cluster
-	Nodes    []Node // nodes outside of any cluster
-	Edges    []Edge
-}
-
-// Write renders the graph and writes it to w.
-func Write(w io.Writer, g Graph) error {
+// Render writes the graph to w.
+func (DOT) Render(w io.Writer, g Graph) error {
 	var dot strings.Builder
 
 	fmt.Fprintf(&dot, "digraph %s {\n", g.Name)

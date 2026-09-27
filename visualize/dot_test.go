@@ -1,4 +1,4 @@
-package dot_test
+package visualize_test
 
 import (
 	"bytes"
@@ -6,27 +6,27 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danceable/container/internal/dot"
+	"github.com/danceable/container/visualize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func render(t *testing.T, g dot.Graph) string {
+func renderDOT(t *testing.T, g visualize.Graph) string {
 	t.Helper()
 
 	var buf bytes.Buffer
-	require.NoError(t, dot.Write(&buf, g))
+	require.NoError(t, visualize.DOT{}.Render(&buf, g))
 
 	return buf.String()
 }
 
-func TestWrite(t *testing.T) {
+func TestDOT(t *testing.T) {
 	t.Parallel()
 
 	t.Run("renders_an_empty_graph", func(t *testing.T) {
 		t.Parallel()
 
-		out := render(t, dot.Graph{Name: "empty"})
+		out := renderDOT(t, visualize.Graph{Name: "empty"})
 
 		assert.Equal(t, "digraph empty {\n"+
 			"\trankdir = LR;\n"+
@@ -38,11 +38,11 @@ func TestWrite(t *testing.T) {
 	t.Run("renders_clusters_with_their_nodes", func(t *testing.T) {
 		t.Parallel()
 
-		out := render(t, dot.Graph{
+		out := renderDOT(t, visualize.Graph{
 			Name: "container",
-			Clusters: []dot.Cluster{
-				{Label: "root", Nodes: []dot.Node{{ID: 0, Label: "main.Shape"}}},
-				{Label: `scope "request"`, Nodes: []dot.Node{{ID: 1, Label: "main.Logger"}}},
+			Clusters: []visualize.Cluster{
+				{Label: "root", Nodes: []visualize.Node{{ID: 0, Label: "main.Shape"}}},
+				{Label: `scope "request"`, Nodes: []visualize.Node{{ID: 1, Label: "main.Logger"}}},
 			},
 		})
 
@@ -55,11 +55,11 @@ func TestWrite(t *testing.T) {
 	t.Run("renders_the_style_of_a_node", func(t *testing.T) {
 		t.Parallel()
 
-		out := render(t, dot.Graph{
-			Nodes: []dot.Node{
+		out := renderDOT(t, visualize.Graph{
+			Nodes: []visualize.Node{
 				{ID: 0, Label: "solid"},
-				{ID: 1, Label: "dashed", Style: dot.Dashed},
-				{ID: 2, Label: "highlighted", Style: dot.Highlighted},
+				{ID: 1, Label: "dashed", Style: visualize.Dashed},
+				{ID: 2, Label: "highlighted", Style: visualize.Highlighted},
 			},
 		})
 
@@ -71,10 +71,10 @@ func TestWrite(t *testing.T) {
 	t.Run("renders_the_style_of_an_edge", func(t *testing.T) {
 		t.Parallel()
 
-		out := render(t, dot.Graph{
-			Edges: []dot.Edge{
+		out := renderDOT(t, visualize.Graph{
+			Edges: []visualize.Edge{
 				{From: 0, To: 1},
-				{From: 1, To: 0, Style: dot.Highlighted},
+				{From: 1, To: 0, Style: visualize.Highlighted},
 			},
 		})
 
@@ -85,7 +85,7 @@ func TestWrite(t *testing.T) {
 	t.Run("quotes_what_a_label_holds", func(t *testing.T) {
 		t.Parallel()
 
-		out := render(t, dot.Graph{Nodes: []dot.Node{{ID: 0, Label: "main.Shape(\"a\")\nsingleton"}}})
+		out := renderDOT(t, visualize.Graph{Nodes: []visualize.Node{{ID: 0, Label: "main.Shape(\"a\")\nsingleton"}}})
 
 		assert.Contains(t, out, `n0 [label = "main.Shape(\"a\")\nsingleton"];`)
 		assert.Equal(t, 1, strings.Count(out, "\n\tn0"), "a newline in a label must not break the line")
@@ -94,7 +94,7 @@ func TestWrite(t *testing.T) {
 	t.Run("returns_the_error_of_the_writer", func(t *testing.T) {
 		t.Parallel()
 
-		err := dot.Write(failingWriter{}, dot.Graph{Name: "container"})
+		err := visualize.DOT{}.Render(failingWriter{}, visualize.Graph{Name: "container"})
 
 		assert.ErrorIs(t, err, errWriteFailed)
 	})

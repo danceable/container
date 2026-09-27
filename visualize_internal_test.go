@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/danceable/container/bind"
-	dotpkg "github.com/danceable/container/internal/dot"
 	"github.com/danceable/container/internal/registerar"
+	"github.com/danceable/container/visualize"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +54,7 @@ func TestDependencyGraph_DrawsACycleInRed(t *testing.T) {
 	g.nodes[shape].edges = append(g.nodes[shape].edges, database)
 
 	var buf bytes.Buffer
-	require.NoError(t, dotpkg.Write(&buf, g.drawing()))
+	require.NoError(t, visualize.DOT{}.Render(&buf, g.drawing()))
 	dot := buf.String()
 
 	assert.Contains(t, dot, fmt.Sprintf("n%d [label = \"container.cycleShape\\ntransient\", color = red, fontcolor = red];", shape))

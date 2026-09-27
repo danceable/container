@@ -22,7 +22,7 @@ Features:
 - Global instance for small applications
 - Concurrency-safe with no race conditions
 - Circular dependency detection, backed by a graph of the bindings
-- Dependency graph visualization in the Graphviz DOT format
+- Dependency graph visualization as Graphviz DOT, a terminal tree, or a live HTML page
 - Bind-time and resolve-time parameter injection
 - 100% Test coverage!
 
@@ -386,6 +386,38 @@ digraph container {
 
 Every binding becomes a node labelled with what it provides and how — named or not, singleton or transient, already built or not — and every dependency becomes an edge. Each scope becomes a cluster, and edges cross them: the graph covers the scope it is called on, the ancestors it resolves from, and its named descendants. A dependency no binding satisfies — one passed at resolve time, or a missing one — is drawn dashed.
 
+The drawing itself is left to a `visualize.Renderer`, DOT being the default. Pass another one with `visualize.WithRenderer()`:
+
+| Renderer | Draws |
+|----------|-------|
+| `visualize.DOT{}` | The Graphviz DOT source above. |
+| `visualize.ASCII{}` | A text tree per scope, for the terminal. `Color: true` draws a cycle in red with ANSI escape codes. |
+| `visualize.HTML{}` | A standalone page laying the graph out in the browser with [Viz.js](https://github.com/mdaines/viz-js), loaded from a CDN. `Title` names the page. |
+
+```go
+c.Visualize(os.Stdout, visualize.WithRenderer(visualize.ASCII{Color: true}))
+```
+
+```text
+root
+|-- main.Database (singleton, resolved)
+`-- main.Shape (transient)
+    `-> main.Database
+
+scope "request"
+`-- main.Logger (singleton)
+    `-> main.Database [root]
+```
+
+`VisualizeHandler()` serves the graph over HTTP, as the HTML page unless told otherwise. It draws the graph anew on every request:
+
+```go
+http.Handle("/debug/container", c.VisualizeHandler())
+http.Handle("/debug/container.dot", c.VisualizeHandler(visualize.WithRenderer(visualize.DOT{})))
+```
+
+Any type implementing `Render(w io.Writer, g visualize.Graph) error` and `ContentType() string` can be passed as a renderer, to draw the graph in a format of your own.
+
 #### Container Methods
 
 | Method | Signature | Description |
@@ -399,7 +431,8 @@ Every binding becomes a node labelled with what it provides and how — named or
 | `Resolve` | `Resolve(abstraction any, opts ...resolve.ResolveOption) error` | Fills a pointer-to-interface (or pointer-to-type) with the matching concrete from the container. |
 | `Call` | `Call(function any, opts ...resolve.ResolveOption) error` | Invokes a function whose parameters are automatically resolved from the container. The function may optionally return an `error`. |
 | `Fill` | `Fill(structure any, opts ...resolve.ResolveOption) error` | Injects dependencies into struct fields tagged with `container:"type"` or `container:"name"`. |
-| `Visualize` | `Visualize(w io.Writer) error` | Writes the dependency graph of the container to `w` in the Graphviz DOT format. |
+| `Visualize` | `Visualize(w io.Writer, opts ...visualize.Option) error` | Writes the dependency graph of the container to `w`, in the Graphviz DOT format unless another renderer is given. |
+| `VisualizeHandler` | `VisualizeHandler(opts ...visualize.Option) http.Handler` | Serves the dependency graph of the container over HTTP, as an HTML page unless another renderer is given. |
 | `Reset` | `Reset()` | Removes all bindings and empties the container. |
 
 Each method also has a `Must` variant (`MustBind`, `MustResolve`, `MustCall`, `MustFill`) that panics on error instead of returning it:

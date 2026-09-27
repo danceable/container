@@ -2,9 +2,11 @@ package container
 
 import (
 	"io"
+	"net/http"
 
 	"github.com/danceable/container/bind"
 	"github.com/danceable/container/resolve"
+	"github.com/danceable/container/visualize"
 )
 
 // Default is the default concrete of the Container.
@@ -46,6 +48,11 @@ func Fill(receiver any, opts ...resolve.ResolveOption) error {
 }
 
 // Visualize calls the same method of the default concrete.
-func Visualize(w io.Writer) error {
-	return Default.Visualize(w)
+func Visualize(w io.Writer, opts ...visualize.Option) error {
+	return Default.Visualize(w, opts...)
+}
+
+// VisualizeHandler calls the same method of the default concrete.
+func VisualizeHandler(opts ...visualize.Option) http.Handler {
+	return Default.VisualizeHandler(opts...)
 }

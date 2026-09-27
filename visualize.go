@@ -1,17 +1,19 @@
 package container
 
 import (
+	"bytes"
 	"io"
+	"net/http"
 	"reflect"
 	"strconv"
 
-	"github.com/danceable/container/internal/dot"
 	"github.com/danceable/container/internal/graph"
 	"github.com/danceable/container/internal/registerar"
+	"github.com/danceable/container/visualize"
 )
 
-// Visualize writes the dependency graph of the container to w in the Graphviz DOT
-// format:
+// Visualize writes the dependency graph of the container to w, in the Graphviz DOT
+// format unless another renderer is given:
 //
 //	var buf bytes.Buffer
 //	if err := c.Visualize(&buf); err != nil { ... }
@@ -19,11 +21,44 @@ import (
 //
 //	// dot -Tsvg container.dot -o container.svg
 //
+//	c.Visualize(os.Stdout, visualize.WithRenderer(visualize.ASCII{Color: true}))
+//
 // It covers the scope it is called on, the ancestors it resolves from and its named
 // descendants: a cluster per scope, a node per binding, an edge per dependency. A
 // dependency no binding satisfies is drawn dashed, a cycle red.
-func (c *Container) Visualize(w io.Writer) error {
-	return dot.Write(w, newScopeGraph(c).drawing())
+func (c *Container) Visualize(w io.Writer, opts ...visualize.Option) error {
+	o := visualize.DefaultOptions(visualize.DOT{})
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	return o.Renderer.Render(w, newScopeGraph(c).drawing())
+}
+
+// VisualizeHandler returns an http.Handler serving the dependency graph of the
+// container, as an HTML page unless another renderer is given:
+//
+//	http.Handle("/debug/container", c.VisualizeHandler())
+//
+// The graph is drawn anew on every request, so it shows the bindings of the moment.
+func (c *Container) VisualizeHandler(opts ...visualize.Option) http.Handler {
+	o := visualize.DefaultOptions(visualize.HTML{})
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	renderer := o.Renderer
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		if err := renderer.Render(&buf, newScopeGraph(c).drawing()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", renderer.ContentType())
+		_, _ = buf.WriteTo(w)
+	})
 }
 
 // scopeSlot identifies a node: a binding by its scope and slot, a dependency no binding
@@ -122,11 +157,11 @@ func (g *scopeGraph) add(n scopeNode) int {
 	return id
 }
 
-// drawing turns the graph into the model the renderer draws, one cluster per scope
+// drawing turns the graph into the model a renderer draws, one cluster per scope
 // holding bindings.
-func (g *scopeGraph) drawing() dot.Graph {
+func (g *scopeGraph) drawing() visualize.Graph {
 	cycle := g.cycleEdges()
-	drawing := dot.Graph{Name: "container"}
+	drawing := visualize.Graph{Name: "container"}
 
 	for _, scope := range g.scopes {
 		nodes := g.drawNodes(scope, cycle)
@@ -134,14 +169,14 @@ func (g *scopeGraph) drawing() dot.Graph {
 			continue
 		}
 
-		drawing.Clusters = append(drawing.Clusters, dot.Cluster{Label: scopeLabel(scope), Nodes: nodes})
+		drawing.Clusters = append(drawing.Clusters, visualize.Cluster{Label: scopeLabel(scope), Nodes: nodes})
 	}
 
 	drawing.Nodes = g.drawNodes(nil, cycle)
 
 	for u := range g.nodes {
 		for _, v := range g.nodes[u].edges {
-			drawing.Edges = append(drawing.Edges, dot.Edge{From: u, To: v, Style: edgeStyle(cycle, u, v)})
+			drawing.Edges = append(drawing.Edges, visualize.Edge{From: u, To: v, Style: edgeStyle(cycle, u, v)})
 		}
 	}
 
@@ -149,15 +184,15 @@ func (g *scopeGraph) drawing() dot.Graph {
 }
 
 // drawNodes returns the nodes of the given scope, or the scopeless ones when it is nil.
-func (g *scopeGraph) drawNodes(scope *Container, cycle map[[2]int]bool) []dot.Node {
-	var nodes []dot.Node
+func (g *scopeGraph) drawNodes(scope *Container, cycle map[[2]int]bool) []visualize.Node {
+	var nodes []visualize.Node
 
 	for u := range g.nodes {
 		if g.nodes[u].scope != scope {
 			continue
 		}
 
-		nodes = append(nodes, dot.Node{ID: u, Label: g.label(u), Style: g.nodeStyle(u, cycle)})
+		nodes = append(nodes, visualize.Node{ID: u, Label: g.label(u), Style: g.nodeStyle(u, cycle)})
 	}
 
 	return nodes
@@ -182,26 +217,26 @@ func (g *scopeGraph) label(u int) string {
 	return n.slot.String() + "\n" + kind
 }
 
-func (g *scopeGraph) nodeStyle(u int, cycle map[[2]int]bool) dot.Style {
+func (g *scopeGraph) nodeStyle(u int, cycle map[[2]int]bool) visualize.Style {
 	for edge := range cycle {
 		if edge[0] == u || edge[1] == u {
-			return dot.Highlighted
+			return visualize.Highlighted
 		}
 	}
 
 	if g.nodes[u].binding == nil {
-		return dot.Dashed
+		return visualize.Dashed
 	}
 
-	return dot.Solid
+	return visualize.Solid
 }
 
-func edgeStyle(cycle map[[2]int]bool, u, v int) dot.Style {
+func edgeStyle(cycle map[[2]int]bool, u, v int) visualize.Style {
 	if cycle[[2]int{u, v}] {
-		return dot.Highlighted
+		return visualize.Highlighted
 	}
 
-	return dot.Solid
+	return visualize.Solid
 }
 
 // cycleEdges returns the edges of a cycle, if the graph has one at all.
